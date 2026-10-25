@@ -20,7 +20,7 @@ const TIMEOUT_MS = clampInt(process.env.CODESIGN_TIMEOUT_MS, 30_000, 1_000, 120_
 
 const client = new CoDesignClient(COOKIE, { timeoutMs: TIMEOUT_MS, defaultPassword: DEFAULT_PASSWORD });
 
-const server = new McpServer({ name: "codesign-mcp", version: VERSION });
+const server = new McpServer({ name: "codesign-mcp-server", version: VERSION });
 
 const urlSchema = z
   .string()

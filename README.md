@@ -1,4 +1,4 @@
-# codesign-mcp
+# codesign-mcp-server
 
 腾讯 CoDesign 设计稿 MCP 服务。让 AI 直接读取设计稿的图层标注、下载切图、生成还原规格。
 
@@ -26,9 +26,9 @@
 ```json
 {
   "mcpServers": {
-    "codesign-mcp": {
+    "codesign-mcp-server": {
       "command": "npx",
-      "args": ["-y", "codesign-mcp"],
+      "args": ["-y", "codesign-mcp-server"],
       "env": {
         "CODESIGN_COOKIE": "你的 Cookie"
       }
@@ -40,8 +40,8 @@
 ### 方式二：本地构建
 
 ```bash
-git clone https://github.com/geniyangge/codesign-mcp.git
-cd codesign-mcp
+git clone https://github.com/geniyangge/codesign-mcp-server.git
+cd codesign-mcp-server
 npm install
 npm run build
 ```
@@ -51,9 +51,9 @@ npm run build
 ```json
 {
   "mcpServers": {
-    "codesign-mcp": {
+    "codesign-mcp-server": {
       "command": "node",
-      "args": ["/path/to/codesign-mcp/dist/index.js"],
+      "args": ["/path/to/codesign-mcp-server/dist/index.js"],
       "env": {
         "CODESIGN_COOKIE": "你的 Cookie"
       }
@@ -62,7 +62,7 @@ npm run build
 }
 ```
 
-> Windows 下路径写成 `"D:\\\\path\\\\to\\\\codesign-mcp\\\\dist\\\\index.js"` 或 `"D:/path/to/codesign-mcp/dist/index.js"`。
+> Windows 下路径写成 `"D:\\\\path\\\\to\\\\codesign-mcp-server\\\\dist\\\\index.js"` 或 `"D:/path/to/codesign-mcp-server/dist/index.js"`。
 
 ## 获取 Cookie
 

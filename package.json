@@ -1,16 +1,28 @@
 {
-  "name": "codesign-mcp",
-  "version": "1.0.1",
+  "name": "codesign-mcp-server",
+  "version": "1.0.2",
   "description": "MCP server for Tencent CoDesign — read design specs, layer annotations, and download slices",
   "type": "module",
   "bin": {
-    "codesign-mcp": "dist/index.js"
+    "codesign-mcp-server": "dist/index.js"
   },
   "main": "dist/index.js",
   "files": [
     "dist",
     "README.md"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/geniyangge/codesign-mcp-server.git"
+  },
+  "homepage": "https://github.com/geniyangge/codesign-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/geniyangge/codesign-mcp-server/issues"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

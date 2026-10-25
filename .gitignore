@@ -5,3 +5,4 @@ codesign-assets/
 *.log
 .DS_Store
 .env
+.omo/
