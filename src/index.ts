@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { CoDesignClient, parseScreenId, parseShareId } from "./client.js";
+import { CoDesignClient, parseDesignId, parseScreenId, parseShareId } from "./client.js";
 import { isCoDesignError } from "./errors.js";
 import { buildSpec } from "./spec.js";
 import { DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
@@ -25,7 +25,12 @@ const server = new McpServer({ name: "codesign-mcp-server", version: VERSION });
 const urlSchema = z
   .string()
   .min(1)
-  .describe("CoDesign 分享链接，如 https://codesign.qq.com/app/s/<分享ID>");
+  .describe(
+    "CoDesign 链接，两种都支持：" +
+      "① 分享链接 https://codesign.qq.com/app/s/<分享ID> 或 /s/<分享ID>/<画板ID>/inspect；" +
+      "② 后台链接 https://codesign.qq.com/app/design/<设计ID>/board（必须配 CODESIGN_COOKIE）。" +
+      "另外也可直接传纯数字分享 ID。",
+  );
 const passwordSchema = z
   .string()
   .min(1)
@@ -177,6 +182,20 @@ async function run(handler: () => Promise<ReturnType<typeof jsonResult>>) {
   }
 }
 
+/**
+ * 解析链接并加载设计稿信息。
+ * 支持两种链接：
+ * - 分享链接 /app/s/<分享ID>：走公开分享接口
+ * - 后台链接 /app/design/<设计ID>/board：直接用 Cookie 调后台接口
+ */
+async function loadShare(url: string, password?: string) {
+  const designId = parseDesignId(url);
+  if (designId !== undefined) {
+    return client.getShareByDesignId(designId);
+  }
+  return client.getShare(parseShareId(url), password);
+}
+
 async function handleDesignGet(args: {
   url: string;
   password?: string;
@@ -185,7 +204,7 @@ async function handleDesignGet(args: {
   maxLayers?: number;
   maxDepth?: number;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   const includeLayers = args.includeLayers !== false;
   const targets = await resolveScreens(
     client,
@@ -246,7 +265,7 @@ async function handleDownloadSlices(args: {
   outDir?: string;
   scale?: number;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   const targets = await resolveScreens(client, share, args.screenId ?? parseScreenId(args.url), {
     slices: true,
     concurrency: CONCURRENCY,
@@ -297,7 +316,7 @@ async function handleDownloadPreviews(args: {
   screenId?: number;
   outDir?: string;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   // 预览只需要画板详情，不必拉图层树和切图清单
   const targets = await resolveScreens(client, share, args.screenId ?? parseScreenId(args.url), {
     concurrency: CONCURRENCY,
@@ -319,7 +338,7 @@ async function handleGetSpec(args: {
   maxLayers?: number;
   maxDepth?: number;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   const explicit = args.screenId ?? parseScreenId(args.url);
   const targets = await resolveScreens(client, share, explicit, {
     meta: true,
