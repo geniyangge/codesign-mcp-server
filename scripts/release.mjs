@@ -221,23 +221,25 @@ const TYPE_LABEL = {
 
 function buildChangelogSection(version) {
   const groups = new Map();
-  for (const subject of commits) {
-    // 跳过发版提交本身
-    if (/^chore(\(.+\))?:\s*(发布|release)/i.test(subject)) continue;
-
-    const m = /^(\w+)(\([^)]+\))?(!)?:\s*(.+)$/.exec(subject);
-    if (!m) {
-      push("杂项", subject);
-      continue;
-    }
-    const [, type, scope, bang, desc] = m;
-    const label = TYPE_LABEL[type] ?? type;
-    push(label, scope ? `**${scope.slice(1, -1)}**: ${desc}` : desc + (bang ? "（破坏性变更）" : ""));
-  }
 
   function push(label, text) {
     if (!groups.has(label)) groups.set(label, []);
     groups.get(label).push(text);
+  }
+
+  for (const subject of commits) {
+    // 跳过发版提交本身与合并提交
+    if (/^chore(\(.+\))?:\s*(发布|release)/i.test(subject)) continue;
+    if (/^Merge (branch|pull request)/i.test(subject)) continue;
+
+    const m = /^(\w+)(\([^)]+\))?(!)?:\s*(.+)$/.exec(subject);
+    if (!m) {
+      push("其他", subject);
+      continue;
+    }
+    const [, type, scope, bang, desc] = m;
+    const label = TYPE_LABEL[type] ?? "其他";
+    push(label, scope ? `**${scope.slice(1, -1)}**: ${desc}` : desc + (bang ? "（破坏性变更）" : ""));
   }
 
   const date = new Date().toISOString().slice(0, 10);
@@ -246,7 +248,7 @@ function buildChangelogSection(version) {
     lines.push("- 本版本无面向用户的变更", "");
   } else {
     // 固定顺序：新增 → 修复 → 其他
-    const order = ["新增", "修复", "性能", "重构", "文档", "测试", "构建", "CI", "样式", "杂项"];
+    const order = ["新增", "修复", "性能", "重构", "文档", "测试", "构建", "CI", "样式", "其他"];
     const keys = [...groups.keys()].sort((a, b) => {
       const ia = order.indexOf(a);
       const ib = order.indexOf(b);
