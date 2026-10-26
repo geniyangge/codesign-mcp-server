@@ -30,7 +30,8 @@
     "version:check": "node scripts/version.mjs",
     "version:sync": "node scripts/version.mjs --sync",
     "test": "npm run version:check && tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
-    "prepublishOnly": "npm run version:check && npm run build"
+    "prepublishOnly": "npm run version:check && npm run build",
+    "release": "node scripts/release.mjs"
   },
   "engines": {
     "node": ">=18.17"
