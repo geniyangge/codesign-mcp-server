@@ -1,6 +1,6 @@
 {
   "name": "codesign-mcp-server",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "MCP server for Tencent CoDesign — read design specs, layer annotations, and download slices",
   "type": "module",
   "bin": {

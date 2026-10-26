@@ -315,7 +315,13 @@ if (DRY_RUN) {
 console.log();
 console.log(c.dim("运行测试…"));
 try {
-  execFileSync("npm", ["test"], { cwd: root, stdio: "pipe", shell: process.platform === "win32" });
+  // Windows 上 npm 是 .cmd，需要走 shell 才能执行；把整个命令拼成一个字符串，
+  // 避免 execFileSync 在 shell 模式下把参数和命令拼接产生的 DEP0190 警告。
+  if (process.platform === "win32") {
+    execFileSync(`npm run test`, { cwd: root, stdio: "pipe", shell: true });
+  } else {
+    execFileSync("npm", ["run", "test"], { cwd: root, stdio: "pipe" });
+  }
   step("测试通过");
 } catch (e) {
   const out = e.stdout?.toString() || e.message;
