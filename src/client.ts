@@ -32,28 +32,80 @@ export interface ClientOptions {
   defaultPassword?: string;
 }
 
+/** 分享链接的各类写法，用于解析分享 ID */
+const SHARE_PATTERNS = [
+  /#?\/app\/s\/(\d+)/,
+  /#?\/s\/(\d+)/,
+  /sharings?\/(\d+)/,
+  /^\s*(\d{10,})\s*$/,
+];
+
+/** 后台链接（需要登录，ID 是设计稿 ID 而非分享 ID），单独识别以便反查分享 */
+const BACKEND_DESIGN_RE = /#?\/app\/design\/(\d+)/;
+const BACKEND_OTHER_PATTERNS: { re: RegExp; kind: string }[] = [
+  { re: /#?\/app\/team\//, kind: "团队页" },
+  { re: /#?\/app\/project\//, kind: "项目页" },
+];
+
+/** 从后台链接里解析设计稿 ID（如 /app/design/<designId>/board） */
+export function parseDesignId(url: string): number | undefined {
+  const m = url.match(BACKEND_DESIGN_RE);
+  return m ? Number(m[1]) : undefined;
+}
+
 /** 从分享链接里解析分享 ID，兼容带不带 hash 前缀的写法 */
 export function parseShareId(url: string): number {
-  const patterns = [
-    /#?\/app\/s\/(\d+)/,
-    /#?\/s\/(\d+)/,
-    /sharings?\/(\d+)/,
-    /^\s*(\d{10,})\s*$/,
-  ];
-  for (const re of patterns) {
+  for (const re of SHARE_PATTERNS) {
     const m = url.match(re);
     if (m) return Number(m[1]);
   }
+
+  // 后台链接：ID 是设计稿 ID，需要先用 Cookie 反查对应的分享 ID
+  if (parseDesignId(url) !== undefined) {
+    throw new CoDesignError(
+      "这是设计稿后台链接，需要先反查分享 ID",
+      undefined,
+      "工具会自动用 Cookie 调用后台接口换出分享 ID；若仍失败，请改用分享链接。",
+      "BACKEND_LINK",
+    );
+  }
+
+  for (const { re, kind } of BACKEND_OTHER_PATTERNS) {
+    if (re.test(url)) {
+      throw new CoDesignError(
+        `这是${kind}链接，不是分享链接`,
+        undefined,
+        [
+          "本工具的接口只认「分享」体系。",
+          "",
+          "获取分享链接：",
+          "  1. 浏览器打开该设计稿",
+          "  2. 点右上角「分享」→ 复制链接（或开启分享）",
+          "  3. 链接形如 https://codesign.qq.com/app/s/<分享ID>",
+        ].join("\n"),
+        "BACKEND_LINK",
+      );
+    }
+  }
+
   throw new CoDesignError(
     `无法从链接中解析分享 ID：${url}`,
     undefined,
-    "支持的格式：\n  https://codesign.qq.com/app/s/<shareId>\n  https://codesign.qq.com/app/s/<shareId>/<screenId>\n  或直接传纯数字 ID",
+    [
+      "支持的格式：",
+      "  https://codesign.qq.com/app/s/<分享ID>",
+      "  https://codesign.qq.com/app/s/<分享ID>/<画板ID>",
+      "  https://codesign.qq.com/s/<分享ID>/<画板ID>/inspect",
+      "  https://codesign.qq.com/app/design/<设计ID>/board（需配 Cookie 反查）",
+      "  或直接传纯数字分享 ID",
+    ].join("\n"),
   );
 }
 
 /** 从分享链接里解析当前打开的画板 ID（可选） */
 export function parseScreenId(url: string): number | undefined {
-  const m = url.match(/#?\/app\/s\/\d+\/(\d+)/);
+  // 分享链接：/app/s/<shareId>/<screenId> 或 /s/<shareId>/<screenId>/inspect
+  const m = url.match(/#?\/(?:app\/)?s\/\d+\/(\d+)/);
   return m ? Number(m[1]) : undefined;
 }
 
@@ -376,6 +428,65 @@ export class CoDesignClient {
     }
   }
 
+  /**
+   * 直接用后台链接的设计稿 ID 读取设计稿。
+   *
+   * 后台接口 `GET /api/designs/<designId>` 需要 Cookie + Bearer，
+   * 返回里带 name / team / sections[].screens[]，结构与分享详情基本一致，
+   * 直接映射成 ShareInfo 即可复用后续全部流程，无需去找分享链接。
+   *
+   * `shareId` 会填成设计稿 ID（此时没有分享 ID 这个概念）。
+   */
+  async getShareByDesignId(designId: number): Promise<ShareInfo> {
+    this.requireCookie("用后台链接读取设计稿");
+
+    const raw: any = await this.request(`${BASE}/api/designs/${designId}`, {
+      headers: { ...this.authHeaders(), referer: `${BASE}/app/design/${designId}/board` },
+    });
+
+    // 后台返回的 sections 与分享详情同构；某些版本顶层也有 screens，做兜底
+    const sections: any[] = Array.isArray(raw?.sections) ? raw.sections : [];
+    let screens = sections.flatMap((sec) => (Array.isArray(sec?.screens) ? sec.screens : []));
+    if (!screens.length && Array.isArray(raw?.screens)) screens = raw.screens;
+
+    if (!screens.length) {
+      throw new CoDesignError(
+        `设计稿 ${designId} 里没有找到任何画板`,
+        undefined,
+        [
+          "后台接口返回成功，但 sections/screens 为空。可能原因：",
+          "  1. 设计稿还在上传处理中，稍后重试",
+          "  2. 当前 Cookie 账号没有该设计稿的查看权限",
+          "  3. 该设计稿尚未上传源文件（只有封面图）",
+        ].join("\n"),
+      );
+    }
+
+    // 后台接口用 permission_type / is_member 表达权限，映射成与分享一致的语义
+    const canInspect = raw?.is_member === true || raw?.is_team_member === true || raw?.permission_type !== "none";
+    const sharingPerm = Array.isArray(raw?.sharings) ? raw.sharings[0]?.permissions : undefined;
+    const assetsDownloadable = sharingPerm?.assetsDownloadable ?? raw?.permission?.assets_downloadable ?? true;
+
+    return {
+      id: designId,
+      title: raw?.name ?? `设计稿 ${designId}`,
+      teamName: raw?.team?.name ?? "",
+      permissions: {
+        commentable: sharingPerm?.commentable ?? true,
+        inspectable: canInspect,
+        assetsDownloadable: Boolean(assetsDownloadable),
+      },
+      designs: [
+        {
+          id: designId,
+          name: raw?.name ?? "",
+          viewport: raw?.viewport ?? "",
+          screens: screens.map((s: any) => ({ id: s.id, name: s.name })),
+        },
+      ],
+    };
+  }
+
   private requireCookie(action: string) {
     if (!this.hasCookie) {
       throw new CoDesignError(
@@ -597,7 +708,17 @@ function normalizeLayer(l: any): Layer {
   if (l.fillOpacity ?? l.fillopacity) layer.fillOpacity = normalizeOpacity(l.fillOpacity ?? l.fillopacity);
   if (l.clipped) layer.clipped = true;
   if (l.blendOptions?.mode) layer.blendMode = l.blendOptions.mode;
-  if (l.smartObject || l.path) layer.isVector = Boolean(l.path);
+  if (l.path) layer.isVector = true;
+
+  // 位图图层：设计稿里是位图/智能对象，没有矢量信息可还原。
+  // 实测这类图层只返回盒子尺寸和 css，没有 fills/borders/effects，只能靠切图还原。
+  // 三种形态：带 pixels 的位图、图片填充、以及智能对象（smartObject，无 path）。
+  const hasPixels = l.pixels !== undefined && l.pixels !== null;
+  const hasImageFill = Array.isArray(l.fills) && l.fills.some((f: any) => f?.fillType === "image");
+  const isSmartObject = l.smartObject !== undefined && l.smartObject !== null;
+  if (!l.path && (hasPixels || hasImageFill || isSmartObject)) {
+    layer.isBitmap = true;
+  }
 
   const effects = normalizeEffects(l.layerEffects);
   if (effects.length) layer.effects = effects;

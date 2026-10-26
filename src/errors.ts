@@ -17,6 +17,7 @@ export type CoDesignErrorCode =
   | "NEED_LOGIN"
   | "NO_PERMISSION"
   | "NOT_FOUND"
+  | "BACKEND_LINK"
   | "NETWORK";
 
 export function isCoDesignError(e: unknown): e is CoDesignError {

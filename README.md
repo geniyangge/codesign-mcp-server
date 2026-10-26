@@ -124,6 +124,25 @@ AI 会自动按这个顺序工作：
 
 > 分享 ID 和画板 ID 都在设计稿链接里：`/app/s/<分享ID>/<画板ID>`。
 
+### 支持的链接格式
+
+两种链接都能直接用，工具会自动识别：
+
+| 链接 | 样例 | 需要 Cookie |
+|---|---|---|
+| 分享链接 | `https://codesign.qq.com/app/s/<分享ID>` | 读图层/切图时需要 |
+| 分享链接（邀请） | `https://codesign.qq.com/s/<分享ID>/<画板ID>/inspect` | 同上 |
+| **后台链接** | `https://codesign.qq.com/app/design/<设计ID>/board` | **必须** |
+
+后台链接指的是你从 CoDesign 工作台直接复制出来的地址。这类链接走的是后台接口（`GET /api/designs/<设计ID>`），依赖登录态，所以必须配 `CODESIGN_COOKIE`。
+
+两种链接的区别：
+
+- **分享链接**走公开分享接口，只要分享开着，换个账号也能读
+- **后台链接**走登录态接口，只有 Cookie 对应账号有权查看的设计稿才读得到，但不需要设计稿额外开启分享
+
+后台链接里可以带画板 ID，也可以用 `screenId` 参数指定；不带则读出全部画板。
+
 ## 带密码的设计稿
 
 分享时勾选了「密码保护」的设计稿，直接读取会返回 403「请输入密码」，此时把密码作为 `password` 参数传入即可：
@@ -152,7 +171,7 @@ AI 会自动按这个顺序工作：
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `url` | string | ✅ | 分享链接 |
+| `url` | string | ✅ | 分享链接或后台设计稿链接 |
 | `password` | string | | 分享访问密码，密码保护的分享必填 |
 | `screenId` | number | | 只解析指定画板 |
 | `includeLayers` | boolean | | 是否返回图层树，默认 true |
@@ -161,11 +180,20 @@ AI 会自动按这个顺序工作：
 
 图层数超过 `maxLayers` 时结果里会出现 `truncated` 和 `warning`，不会静默截断。
 
+**位图图层**：设计稿里如果是位图（智能对象、图片填充），CoDesign 只返回盒子尺寸和 css，没有 fills / borders / effects，矢量细节无从得知。这类图层会标记 `isBitmap: true`，并按是否有切图分两种情况：
+
+| 字段 | 含义 | 怎么处理 |
+|---|---|---|
+| `slice` 存在 | 该图层已标记切图，`slice.scales` 给出可用倍率 | 用 `design_download_slices` 下载，按 `<img>` / `background-image` 还原 |
+| `slice` 缺失 | 位图且没有导出切图 | 细节无法还原，会出现在画板的 `unreconstructable` 列表里 |
+
+`unreconstructable` 会列出图层名和尺寸，`warning` 里也会汇总，避免 AI 凭空猜测尺寸、间距、圆角、描边之类的细节。
+
 ### design_download_slices
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `url` | string | ✅ | 分享链接 |
+| `url` | string | ✅ | 分享链接或后台设计稿链接 |
 | `password` | string | | 分享访问密码，密码保护的分享必填 |
 | `screenId` | number | | 画板 ID |
 | `outDir` | string | | 输出目录 |
@@ -191,7 +219,7 @@ AI 会自动按这个顺序工作：
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `url` | string | ✅ | 分享链接 |
+| `url` | string | ✅ | 分享链接或后台设计稿链接 |
 | `password` | string | | 分享访问密码，密码保护的分享必填 |
 | `screenId` | number | | 画板 ID |
 | `outDir` | string | | 输出目录 |
@@ -202,7 +230,7 @@ AI 会自动按这个顺序工作：
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `url` | string | ✅ | 分享链接 |
+| `url` | string | ✅ | 分享链接或后台设计稿链接 |
 | `password` | string | | 分享访问密码，密码保护的分享必填 |
 | `screenId` | number | | 画板 ID |
 | `cssWidth` | number | | 目标 CSS 宽度，默认 375；传 750 输出原始 px |
@@ -220,6 +248,7 @@ CoDesign 没有开放 API，本项目通过逆向其内部接口实现：
 |---|---|
 | `/api/sharings/<shareId>` | 无需登录；密码分享需 `state-key` 头 |
 | `/api/sharings/<shareId>/state-keys` | `POST {password}` → `{key, expires}` |
+| `/api/designs/<designId>` | Cookie + `Authorization: Bearer`（后台链接用） |
 | `/api/designs/<designId>/screens/<screenId>` | Cookie + `Authorization: Bearer` |
 | `cdn4.codesign.qq.com/meta/...`（图层/切图 JSON） | 需 `Origin: https://codesign.qq.com` |
 | 切图图片 | 同上，位图需带 `?imageMogr2/format/png`，svg 不能带 |

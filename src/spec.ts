@@ -56,6 +56,8 @@ function styleFromLayerCss(l: Layer, scale: number): string[] | undefined {
 function flags(l: Layer): string[] {
   const out: string[] = [];
   if (l.type === "text") out.push("text");
+  // 位图图层没有矢量信息，标出来避免调用方以为漏了样式
+  if (l.isBitmap) out.push(l.slice ? "bitmap:slice" : "bitmap:no-slice");
   return out;
 }
 
@@ -296,6 +298,27 @@ export function buildSpec(
   if (groupsWithoutCss.length) {
     notes.push(
       `${groupsWithoutCss.length} 个组图层既没有 css 也没有切图，其视觉效果来自子图层或未导出的合成，需要人工确认`,
+    );
+  }
+
+  // 位图图层：设计稿只给盒子尺寸，没有可还原的样式，只能靠切图
+  const bitmaps = flat.filter(({ layer }) => layer.isBitmap);
+  const bitmapsWithSlice = bitmaps.filter(({ layer }) => layer.slice);
+  const bitmapsWithoutSlice = bitmaps.filter(({ layer }) => !layer.slice);
+  if (bitmapsWithSlice.length) {
+    notes.push(
+      `${bitmapsWithSlice.length} 个位图图层有切图，请用 design_download_slices 下载后以 <img>/background-image 还原，不要按盒子尺寸重画`,
+    );
+  }
+  if (bitmapsWithoutSlice.length) {
+    notes.push(
+      `${bitmapsWithoutSlice.length} 个位图图层既没有矢量信息也没有切图，细节无法还原（` +
+        bitmapsWithoutSlice
+          .slice(0, 5)
+          .map(({ layer }) => `${layer.name || layer.type} ${layer.rect.width}×${layer.rect.height}`)
+          .join("、") +
+        `${bitmapsWithoutSlice.length > 5 ? " 等" : ""}）。` +
+        "需要设计同学在 CoDesign 里把它们标记为切图导出",
     );
   }
 

@@ -5,6 +5,7 @@ import type { CoDesignClient } from "./client.js";
 import { CoDesignError } from "./errors.js";
 import type {
   DownloadResult,
+  Layer,
   LayerTree,
   ScreenDetail,
   ShareInfo,
@@ -138,6 +139,35 @@ export interface DownloadOptions {
   concurrency?: number;
   /** 同一目录内共享命名器，跨画板/跨批次去重 */
   namer?: ReturnType<typeof createNamer>;
+}
+
+/** 把切图清单挂到图层树上，按 object_id 关联 */
+export function attachSlices(layers: Layer[], slices: SliceItem[]): Layer[] {
+  if (!slices.length) return layers;
+
+  const byId = new Map<string, SliceItem>();
+  for (const s of slices) byId.set(String(s.id), s);
+
+  const link = (l: Layer): Layer => {
+    const slice = byId.get(l.objectId);
+    if (slice && slice.exports.length) {
+      const scales = [...new Set(slice.exports.map((e) => e.scale))].sort((a, b) => a - b);
+      const formats = [...new Set(slice.exports.map((e) => e.format))];
+      // 取最高倍率那一档的实际导出尺寸
+      const top = slice.exports.reduce((a, b) => (b.scale > a.scale ? b : a));
+      l.slice = {
+        objectId: l.objectId,
+        scales,
+        formats,
+        exportWidth: top.width,
+        exportHeight: top.height,
+      };
+    }
+    if (l.children?.length) l.children = l.children.map(link);
+    return l;
+  };
+
+  return layers.map(link);
 }
 
 export async function downloadSlices(

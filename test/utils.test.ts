@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { parseScreenId, parseShareId, toCdnUrl } from "../src/client.js";
+import { parseDesignId, parseScreenId, parseShareId, toCdnUrl } from "../src/client.js";
 import { CoDesignError } from "../src/errors.js";
 import { mapLimit } from "../src/utils/concurrency.js";
 import { createNamer, sanitizeFilename } from "../src/utils/filename.js";
@@ -21,9 +21,45 @@ test("parseShareId 无法解析时抛出带提示的 CoDesignError", () => {
   );
 });
 
+test("parseDesignId 识别后台设计稿链接", () => {
+  assert.equal(parseDesignId("https://codesign.qq.com/app/design/123456789012345/board"), 123456789012345);
+  assert.equal(parseDesignId("https://codesign.qq.com/app/design/123456789012345"), 123456789012345);
+  // 分享链接不应被当成后台链接
+  assert.equal(parseDesignId("https://codesign.qq.com/app/s/100000000000001"), undefined);
+});
+
+test("parseShareId 遇到后台设计稿链接时指向 parseDesignId", () => {
+  assert.throws(
+    () => parseShareId("https://codesign.qq.com/app/design/123456789012345/board"),
+    (e: any) => {
+      if (!(e instanceof CoDesignError)) return false;
+      assert.equal(e.code, "BACKEND_LINK");
+      assert.match(e.message, /后台链接/);
+      return true;
+    },
+  );
+});
+
+test("parseShareId 对团队/项目页给出「不是分享链接」提示", () => {
+  for (const url of [
+    "https://codesign.qq.com/app/team/123/overview",
+    "https://codesign.qq.com/app/project/456",
+  ]) {
+    assert.throws(
+      () => parseShareId(url),
+      (e: any) => e instanceof CoDesignError && /不是分享链接/.test(e.message),
+      `应拒绝: ${url}`,
+    );
+  }
+});
+
 test("parseScreenId 只在带画板 ID 时返回", () => {
   assert.equal(parseScreenId("https://codesign.qq.com/app/s/100000000000001/100000000000002"), 100000000000002);
   assert.equal(parseScreenId("https://codesign.qq.com/app/s/100000000000001"), undefined);
+  // /s/<id>/<screenId>/inspect 形式（带密码的邀请链接）
+  assert.equal(parseScreenId("https://codesign.qq.com/s/100000000000001/100000000000002/inspect"), 100000000000002);
+  // 后台链接不应被当成画板 ID
+  assert.equal(parseScreenId("https://codesign.qq.com/app/design/100000000000001/board"), undefined);
 });
 
 test("toCdnUrl 把 OSS 签名直链换成 CDN 域名并追加 imageMogr2", () => {

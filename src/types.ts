@@ -78,6 +78,18 @@ export interface LayerEffect {
   [key: string]: unknown;
 }
 
+/** 切图清单里的一条导出项（关联到图层时使用） */
+export interface LayerSlice {
+  /** 该图层的 object_id */
+  objectId: string;
+  /** 可用的导出倍率 */
+  scales: number[];
+  formats: string[];
+  /** 导出图的像素尺寸，按倍率给出最高的一档 */
+  exportWidth: number;
+  exportHeight: number;
+}
+
 export interface Layer {
   id: string;
   /** CoDesign 的 object_id，切图清单里用它关联图层 */
@@ -103,6 +115,13 @@ export interface Layer {
   rotation?: number;
   /** 图层带矢量路径 */
   isVector?: boolean;
+  /**
+   * 位图图层：设计稿里是位图（智能对象/图片填充），没有矢量信息可还原。
+   * 这类图层只能靠切图还原，`slice` 字段给出可下载的切图。
+   */
+  isBitmap?: boolean;
+  /** 该图层在切图清单里的信息（仅当它被标记为切图时才有） */
+  slice?: LayerSlice;
   children?: Layer[];
 }
 

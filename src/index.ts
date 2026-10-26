@@ -3,10 +3,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { CoDesignClient, parseScreenId, parseShareId } from "./client.js";
+import { CoDesignClient, parseDesignId, parseScreenId, parseShareId } from "./client.js";
 import { isCoDesignError } from "./errors.js";
 import { buildSpec } from "./spec.js";
-import { DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
+import { attachSlices, DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
 import type { Layer } from "./types.js";
 import { createNamer } from "./utils/filename.js";
 import { VERSION } from "./version.js";
@@ -25,7 +25,12 @@ const server = new McpServer({ name: "codesign-mcp-server", version: VERSION });
 const urlSchema = z
   .string()
   .min(1)
-  .describe("CoDesign 分享链接，如 https://codesign.qq.com/app/s/<分享ID>");
+  .describe(
+    "CoDesign 链接，两种都支持：" +
+      "① 分享链接 https://codesign.qq.com/app/s/<分享ID> 或 /s/<分享ID>/<画板ID>/inspect；" +
+      "② 后台链接 https://codesign.qq.com/app/design/<设计ID>/board（必须配 CODESIGN_COOKIE）。" +
+      "另外也可直接传纯数字分享 ID。",
+  );
 const passwordSchema = z
   .string()
   .min(1)
@@ -53,7 +58,10 @@ server.registerTool(
     description: [
       "读取腾讯 CoDesign 设计稿：返回设计稿标题、团队、所有画板列表，",
       "以及每个画板的完整图层标注（坐标、尺寸、字体、字号、字距、颜色、圆角、渐变、效果）。",
-      "传入分享链接即可。若链接里带画板 ID 则只解析该画板，否则解析全部。",
+      "支持分享链接和后台链接（/app/design/<设计ID>/board）。",
+      "说明：图层上若是 isBitmap=true，表示这是位图，设计稿没有矢量信息；",
+      "此时看 slice 字段：有 slice 就用 design_download_slices 下载后用图片还原，",
+      "没有 slice 则该图层细节无法还原，会在 unreconstructable 列表里列出。",
       "这是还原设计稿的第一步，先用它拿到图层结构。",
     ].join(""),
     inputSchema: {
@@ -177,6 +185,20 @@ async function run(handler: () => Promise<ReturnType<typeof jsonResult>>) {
   }
 }
 
+/**
+ * 解析链接并加载设计稿信息。
+ * 支持两种链接：
+ * - 分享链接 /app/s/<分享ID>：走公开分享接口
+ * - 后台链接 /app/design/<设计ID>/board：直接用 Cookie 调后台接口
+ */
+async function loadShare(url: string, password?: string) {
+  const designId = parseDesignId(url);
+  if (designId !== undefined) {
+    return client.getShareByDesignId(designId);
+  }
+  return client.getShare(parseShareId(url), password);
+}
+
 async function handleDesignGet(args: {
   url: string;
   password?: string;
@@ -185,13 +207,15 @@ async function handleDesignGet(args: {
   maxLayers?: number;
   maxDepth?: number;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   const includeLayers = args.includeLayers !== false;
+  // 带上切图清单：位图图层本身没有矢量信息，只能靠切图还原，
+  // 必须让 AI 知道哪些图层有切图可用
   const targets = await resolveScreens(
     client,
     share,
     args.screenId ?? parseScreenId(args.url),
-    { meta: includeLayers, concurrency: CONCURRENCY },
+    { meta: includeLayers, slices: includeLayers, concurrency: CONCURRENCY },
   );
 
   const maxLayers = args.maxLayers ?? 800;
@@ -207,6 +231,8 @@ async function handleDesignGet(args: {
     screens: [] as any[],
   };
 
+  const bitmapNotes: string[] = [];
+
   for (const t of targets) {
     const entry: any = {
       id: t.detail.id,
@@ -217,10 +243,25 @@ async function handleDesignGet(args: {
     };
 
     if (includeLayers && t.tree) {
-      const total = countLayers(t.tree.layers);
-      const limited = limitTree(t.tree.layers, maxLayers, maxDepth);
+      // 把切图信息挂到对应图层上，bitmap 图层才能被还原
+      const withSlices = attachSlices(t.tree.layers, t.slices ?? []);
+      const total = countLayers(withSlices);
+      const limited = limitTree(withSlices, maxLayers, maxDepth);
       entry.layers = limited.layers;
       entry.layerCount = total;
+
+      // 统计无法矢量还原、也没有切图的图层，明确告诉 AI「这些做不到」
+      const missing = collectUnreconstructable(limited.layers);
+      if (missing.length) {
+        entry.unreconstructable = missing;
+        bitmapNotes.push(
+          `${t.detail.name}：${missing.length} 个图层是位图且没有切图，无法还原细节（${missing
+            .slice(0, 5)
+            .map((m) => `${m.name}(${m.size})`)
+            .join("、")}${missing.length > 5 ? " 等" : ""}）`,
+        );
+      }
+
       if (limited.truncated) {
         entry.truncated = { returned: limited.returned, maxLayers, maxDepth: maxDepth === Infinity ? undefined : maxDepth };
         payload.warning =
@@ -229,6 +270,10 @@ async function handleDesignGet(args: {
       }
     }
     payload.screens.push(entry);
+  }
+
+  if (bitmapNotes.length) {
+    payload.warning = [payload.warning, ...bitmapNotes].filter(Boolean).join("\n");
   }
 
   if (!client.hasCookie) {
@@ -246,7 +291,7 @@ async function handleDownloadSlices(args: {
   outDir?: string;
   scale?: number;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   const targets = await resolveScreens(client, share, args.screenId ?? parseScreenId(args.url), {
     slices: true,
     concurrency: CONCURRENCY,
@@ -297,7 +342,7 @@ async function handleDownloadPreviews(args: {
   screenId?: number;
   outDir?: string;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   // 预览只需要画板详情，不必拉图层树和切图清单
   const targets = await resolveScreens(client, share, args.screenId ?? parseScreenId(args.url), {
     concurrency: CONCURRENCY,
@@ -319,7 +364,7 @@ async function handleGetSpec(args: {
   maxLayers?: number;
   maxDepth?: number;
 }) {
-  const share = await client.getShare(parseShareId(args.url), args.password || undefined);
+  const share = await loadShare(args.url, args.password);
   const explicit = args.screenId ?? parseScreenId(args.url);
   const targets = await resolveScreens(client, share, explicit, {
     meta: true,
@@ -331,14 +376,16 @@ async function handleGetSpec(args: {
 
   // 规格与下载共用同一套命名规则，保证 file 字段和实际落盘一致
   const namer = createNamer();
-  const specs = picked.map((t) =>
-    buildSpec(t.detail, t.tree!, t.slices ?? [], {
+  const specs = picked.map((t) => {
+    // 关联切图，位图图层才能知道「有切图可用」而不是「信息缺失」
+    const linked = { ...t.tree!, layers: attachSlices(t.tree!.layers, t.slices ?? []) };
+    return buildSpec(t.detail, linked, t.slices ?? [], {
       cssWidth: args.cssWidth,
       maxLayers: args.maxLayers,
       maxDepth: args.maxDepth,
       namer,
-    }),
-  );
+    });
+  });
   return jsonResult({
     title: share.title,
     count: specs.length,
@@ -346,6 +393,28 @@ async function handleGetSpec(args: {
     ...(explicit ? {} : { screenIds: targets.map((t) => ({ id: t.detail.id, name: t.detail.name })) }),
     specs,
   });
+}
+
+/**
+ * 找出「位图且没有切图」的图层。
+ * 这类图层设计稿只给盒子尺寸，没有可还原的样式信息，
+ * 必须显式告诉调用方，否则 AI 会凭空猜。
+ */
+function collectUnreconstructable(
+  layers: Layer[],
+  out: { objectId: string; name: string; size: string }[] = [],
+) {
+  for (const l of layers) {
+    if (l.isBitmap && !l.slice && l.visible) {
+      out.push({
+        objectId: l.objectId,
+        name: l.name || l.type,
+        size: `${l.rect.width}×${l.rect.height}`,
+      });
+    }
+    if (l.children?.length) collectUnreconstructable(l.children, out);
+  }
+  return out;
 }
 
 function countLayers(layers: Layer[]): number {
