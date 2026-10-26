@@ -708,7 +708,17 @@ function normalizeLayer(l: any): Layer {
   if (l.fillOpacity ?? l.fillopacity) layer.fillOpacity = normalizeOpacity(l.fillOpacity ?? l.fillopacity);
   if (l.clipped) layer.clipped = true;
   if (l.blendOptions?.mode) layer.blendMode = l.blendOptions.mode;
-  if (l.smartObject || l.path) layer.isVector = Boolean(l.path);
+  if (l.path) layer.isVector = true;
+
+  // 位图图层：设计稿里是位图/智能对象，没有矢量信息可还原。
+  // 实测这类图层只返回盒子尺寸和 css，没有 fills/borders/effects，只能靠切图还原。
+  // 三种形态：带 pixels 的位图、图片填充、以及智能对象（smartObject，无 path）。
+  const hasPixels = l.pixels !== undefined && l.pixels !== null;
+  const hasImageFill = Array.isArray(l.fills) && l.fills.some((f: any) => f?.fillType === "image");
+  const isSmartObject = l.smartObject !== undefined && l.smartObject !== null;
+  if (!l.path && (hasPixels || hasImageFill || isSmartObject)) {
+    layer.isBitmap = true;
+  }
 
   const effects = normalizeEffects(l.layerEffects);
   if (effects.length) layer.effects = effects;

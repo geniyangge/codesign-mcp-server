@@ -180,6 +180,15 @@ AI 会自动按这个顺序工作：
 
 图层数超过 `maxLayers` 时结果里会出现 `truncated` 和 `warning`，不会静默截断。
 
+**位图图层**：设计稿里如果是位图（智能对象、图片填充），CoDesign 只返回盒子尺寸和 css，没有 fills / borders / effects，矢量细节无从得知。这类图层会标记 `isBitmap: true`，并按是否有切图分两种情况：
+
+| 字段 | 含义 | 怎么处理 |
+|---|---|---|
+| `slice` 存在 | 该图层已标记切图，`slice.scales` 给出可用倍率 | 用 `design_download_slices` 下载，按 `<img>` / `background-image` 还原 |
+| `slice` 缺失 | 位图且没有导出切图 | 细节无法还原，会出现在画板的 `unreconstructable` 列表里 |
+
+`unreconstructable` 会列出图层名和尺寸，`warning` 里也会汇总，避免 AI 凭空猜测尺寸、间距、圆角、描边之类的细节。
+
 ### design_download_slices
 
 | 参数 | 类型 | 必填 | 说明 |
