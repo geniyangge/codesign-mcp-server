@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import type { CoDesignClient } from "./client.js";
 import { CoDesignError } from "./errors.js";
-import { planSlices, type ExportFormat } from "./slicing.js";
+import { planSlices, imageOps, appendImageOps, type ExportFormat } from "./slicing.js";
 import type {
   DownloadResult,
   Layer,
@@ -256,14 +256,31 @@ export async function downloadPreviews(
   client: CoDesignClient,
   targets: ResolvedScreen[],
   outDir: string,
-  options: { concurrency?: number; namer?: ReturnType<typeof createNamer> } = {},
+  options: {
+    concurrency?: number;
+    namer?: ReturnType<typeof createNamer>;
+    /** 目标倍率，1 表示原图；>1 由服务端放大 */
+    scale?: number;
+    /** 目标像素宽，优先于 scale */
+    targetWidth?: number;
+  } = {},
 ): Promise<DownloadResult[]> {
   await mkdir(outDir, { recursive: true });
   const namer = options.namer ?? createNamer();
 
   return mapLimit(targets, options.concurrency ?? 6, async (t) => {
-    const file = namer(`${sanitizeFilename(t.detail.name, "screen")}_preview`, "png");
-    if (!t.detail.previewUrl) {
+    const wantWidth =
+      options.targetWidth && options.targetWidth > 0
+        ? Math.round(options.targetWidth)
+        : options.scale && options.scale > 0
+          ? Math.round(t.detail.width * options.scale)
+          : undefined;
+    const ops = wantWidth ? imageOps({ targetWidth: wantWidth }) : [];
+    const file = namer(
+      sanitizeFilename(`${t.detail.name}_preview${wantWidth ? `@${Math.round(wantWidth / (t.detail.width || 1))}x` : ""}`, "screen"),
+      "png",
+    );
+    if (!t.detail.originalUrl && !t.detail.previewUrl) {
       return {
         name: t.detail.name,
         path: file,
@@ -274,14 +291,17 @@ export async function downloadPreviews(
         error: "该画板没有预览图",
       };
     }
+    const url = appendImageOps(t.detail.originalUrl ?? t.detail.previewUrl!, ops);
+    const width = wantWidth ?? t.detail.width;
+    const height = wantWidth ? Math.round((t.detail.height / (t.detail.width || 1)) * wantWidth) : t.detail.height;
     try {
-      const buf = await client.downloadImage(t.detail.previewUrl);
+      const buf = await client.downloadImage(url);
       await writeFile(join(outDir, file), buf);
       return {
         name: t.detail.name,
         path: file,
-        width: t.detail.width,
-        height: t.detail.height,
+        width,
+        height,
         bytes: buf.length,
         ok: true,
       };
@@ -289,8 +309,8 @@ export async function downloadPreviews(
       return {
         name: t.detail.name,
         path: file,
-        width: t.detail.width,
-        height: t.detail.height,
+        width,
+        height,
         bytes: 0,
         ok: false,
         error: e instanceof Error ? e.message : String(e),
