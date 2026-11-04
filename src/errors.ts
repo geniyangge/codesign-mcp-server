@@ -163,7 +163,13 @@ export function explainNetworkError(e: unknown, url: string): CoDesignError {
   const code = cause?.code ?? (e as any)?.code;
   const detail = code ? `${code}` : e instanceof Error ? e.message : String(e);
 
-  if ((e as any)?.name === "AbortError" || code === "ABORT_ERR") {
+  // Node 18.17+ 的 AbortSignal.timeout() 抛 TimeoutError（code 23），
+  // 与手动 AbortController.abort() 的 AbortError 不是一回事，两者都要认
+  if (
+    (e as any)?.name === "AbortError" ||
+    (e as any)?.name === "TimeoutError" ||
+    code === "ABORT_ERR"
+  ) {
     return new CoDesignError(
       "请求超时",
       undefined,
