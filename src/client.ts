@@ -348,7 +348,12 @@ export class CoDesignClient {
       metaUrl: rewrite(raw.meta_url),
       slicesUrl: rewrite(raw.slices_url),
       previewUrl: rewrite(raw.preview_path),
+      // 原图与预览图实测是同一个文件（全分辨率合成图），用于按区域裁剪
+      originalUrl: rewrite(raw.original_path) ?? rewrite(raw.preview_path),
+      // `slices_count` 元数据不可信（实测 h5 画板给 0 但切图清单实返 13 条），
+      // 真实值由 resolveScreens 拉到清单后覆盖，原值留档到这里
       slicesCount: raw.slices_count ?? 0,
+      slicesCountReported: raw.slices_count ?? 0,
     };
   }
 
@@ -643,6 +648,12 @@ function withAlpha(hex: string, alpha: number): string {
 /**
  * 用 parent_id 把扁平的 layers + groups 重建成真正的树。
  * 画板自身的 object_id 是根；找不到父节点的节点挂到根上，避免丢数据。
+ *
+ * 兄弟节点必须按 `index` 升序排列：`index` 是**全局绘制顺序**，
+ * 而 `layers` 与 `groups` 是两个独立数组，直接拼接会让所有组都排到所有形状之后
+ * （实测某画板 6 个组全被推到末位，层叠关系完全错乱）。
+ * 注意 `index` 是全局的，子节点可能小于父组（父 29 / 子 24–28），
+ * 所以只能用于**兄弟之间**排序，不能拿来判断父子。
  */
 export function buildLayerTree(nodes: any[], rootId: unknown): Layer[] {
   if (!nodes.length) return [];
@@ -658,6 +669,7 @@ export function buildLayerTree(nodes: any[], rootId: unknown): Layer[] {
     if (!childrenOf.has(pid)) childrenOf.set(pid, []);
     childrenOf.get(pid)!.push(n);
   }
+  for (const [pid, kids] of childrenOf) childrenOf.set(pid, sortByIndex(kids));
 
   const build = (n: any, seen: Set<string>): Layer => {
     const layer = normalizeLayer(n);
@@ -670,12 +682,73 @@ export function buildLayerTree(nodes: any[], rootId: unknown): Layer[] {
 
   const rootChildren = childrenOf.get(String(rootId ?? "")) ?? [];
   if (rootChildren.length) {
-    return rootChildren.map((n) => build(n, new Set()));
+    const tree = rootChildren.map((n) => build(n, new Set()));
+    finalizeRects(tree);
+    return tree;
   }
 
   // 没有可用的根（例如画板 object_id 缺失）：从“父节点不在集合里”的节点开始
-  const orphans = nodes.filter((n) => !byId.has(String(n?.parent_id ?? "")));
-  return (orphans.length ? orphans : nodes).map((n) => build(n, new Set()));
+  const orphans = sortByIndex(nodes.filter((n) => !byId.has(String(n?.parent_id ?? ""))));
+  const tree = (orphans.length ? orphans : sortByIndex(nodes)).map((n) => build(n, new Set()));
+  finalizeRects(tree);
+  return tree;
+}
+
+/** 按 index 升序；任一节点缺 index 时保持原数组顺序（老数据/测试 fixture 兼容） */
+function sortByIndex(nodes: any[]): any[] {
+  const hasIndex = nodes.some((n) => typeof n?.index === "number" && Number.isFinite(n.index));
+  if (!hasIndex) return nodes;
+  // Array#sort 在 V8 里稳定，缺 index 的节点因此维持原有相对次序
+  return [...nodes].sort((a, b) => {
+    const ai = typeof a?.index === "number" ? a.index : undefined;
+    const bi = typeof b?.index === "number" ? b.index : undefined;
+    if (ai === undefined || bi === undefined) return 0;
+    return ai - bi;
+  });
+}
+
+/**
+ * 校正盒子并标注可信度。
+ *
+ * 实测两类问题：
+ * - 空组返回 0×0（h5 画板 311/345/344），拿它布局必然错位
+ * - 子层比父组还大（子 368 报 750×1612，父组 764 报 388×180）
+ * 组的真实内容框取自可见子层的并集；两者矛盾时把 rect 标为低可信并给出推定的 sliceRect，
+ * 由调用方自行决定信谁，不静默改数。
+ */
+function finalizeRects(layers: Layer[]): void {
+  for (const l of layers) {
+    if (l.children?.length) finalizeRects(l.children);
+
+    const box = l.rect;
+    const isEmpty = box.width === 0 || box.height === 0;
+    if (!isEmpty && l.children?.length) {
+      const union = unionRect(l.children.filter((c) => c.visible).map((c) => c.rect));
+      // 子层溢出父组说明组自身的 rect 不可信
+      if (union && (union.width > box.width + 1 || union.height > box.height + 1)) {
+        l.rectConfidence = "low";
+        l.sliceRect = union;
+      }
+      continue;
+    }
+
+    if (isEmpty) {
+      const union = l.children?.length ? unionRect(l.children.filter((c) => c.visible).map((c) => c.rect)) : undefined;
+      l.rectConfidence = "low";
+      if (union && union.width > 0 && union.height > 0) l.sliceRect = union;
+    }
+  }
+}
+
+/** 多个盒子的最小外接矩形；全部无效时返回 undefined */
+function unionRect(rects: LayerRect[]): LayerRect | undefined {
+  const valid = rects.filter((r) => r.width > 0 && r.height > 0);
+  if (!valid.length) return undefined;
+  const x = Math.min(...valid.map((r) => r.x));
+  const y = Math.min(...valid.map((r) => r.y));
+  const right = Math.max(...valid.map((r) => r.x + r.width));
+  const bottom = Math.max(...valid.map((r) => r.y + r.height));
+  return { x, y, width: right - x, height: bottom - y };
 }
 
 function normalizeRect(rect?: any): LayerRect {
@@ -709,6 +782,8 @@ function normalizeLayer(l: any): Layer {
   if (l.clipped) layer.clipped = true;
   if (l.blendOptions?.mode) layer.blendMode = l.blendOptions.mode;
   if (l.path) layer.isVector = true;
+  // 全局绘制顺序，兄弟节点按它升序排列后才有正确的层叠关系
+  if (typeof l.index === "number" && Number.isFinite(l.index)) layer.z = l.index;
 
   // 位图图层：设计稿里是位图/智能对象，没有矢量信息可还原。
   // 实测这类图层只返回盒子尺寸和 css，没有 fills/borders/effects，只能靠切图还原。
@@ -761,9 +836,22 @@ function normalizeText(l: any): Layer["text"] {
     lineHeight: leading,
     letterSpacing: numberOr(l.letterSpacing, undefined),
     color: rgba(tr.color) ?? rgba(l.color),
-    textAlign: l.textAlign,
+    textAlign: resolveTextAlign(l),
     allCaps: false,
   };
+}
+
+/**
+ * 文本对齐。`paragraphStyleRange[].paragraphStyle.align` 才是权威来源，
+ * 图层级的 `l.textAlign` 只是兜底——实测同一段文本的 fragments 可以有不同的 textAlign。
+ */
+function resolveTextAlign(l: any): string | undefined {
+  const paras: any[] = l.text?.paragraphStyleRange ?? [];
+  for (const p of paras) {
+    const align = p?.paragraphStyle?.align;
+    if (typeof align === "string" && align.trim()) return align.trim();
+  }
+  return typeof l.textAlign === "string" && l.textAlign.trim() ? l.textAlign.trim() : undefined;
 }
 
 /** 设计稿的字重可能是数字 700、字符串 "700" 或 "Bold" */
@@ -792,9 +880,28 @@ function resolveTextContent(l: any): string {
   return l.name ?? "";
 }
 
+/**
+ * 取第一个可用的数值。
+ *
+ * CoDesign 的数值字段有两种形态：裸数字 `22`，以及带单位的对象 `{ value: 22, units: "pointsUnit" }`。
+ * 只认裸数字会让 `{value, units}` 的文本层拿到 undefined，最终在 spec 里输出 `font-size: NaNpx`
+ * ——实测 h5 画板 2 个文本层因此中招。
+ * `units` 目前只见过 `pointsUnit`，其 value 已经是设计稿 px，与裸数字同量纲，直接取用。
+ */
 function numberOr<T>(...vals: (T | undefined | null)[]): any {
   for (const v of vals) {
-    if (typeof v === "number" && Number.isFinite(v)) return v;
+    const n = unwrapNumber(v);
+    if (n !== undefined) return n;
+  }
+  return undefined;
+}
+
+/** 解包数值：裸数字直接返回，`{ value }` 取 value，其余视为缺失 */
+function unwrapNumber(v: unknown): number | undefined {
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (v && typeof v === "object" && "value" in (v as any)) {
+    const inner = (v as any).value;
+    if (typeof inner === "number" && Number.isFinite(inner)) return inner;
   }
   return undefined;
 }

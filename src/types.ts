@@ -32,7 +32,12 @@ export interface ScreenDetail {
   metaUrl?: string;
   slicesUrl?: string;
   previewUrl?: string;
+  /** 全分辨率原图，按区域裁剪时的源（实测与 previewUrl 指向同一文件） */
+  originalUrl?: string;
+  /** 实际切图数，由切图清单长度覆盖 */
   slicesCount: number;
+  /** 接口原样返回的 slices_count，可能不准（实测给 0 但实际有 13 条） */
+  slicesCountReported?: number;
 }
 
 export interface LayerRect {
@@ -98,6 +103,15 @@ export interface Layer {
   type: string;
   rect: LayerRect;
   visible: boolean;
+  /** 全局绘制顺序（源数据的 index），兄弟节点按它升序排列 */
+  z?: number;
+  /**
+   * rect 的可信度。组图层经常返回整屏尺寸或 0×0，
+   * 真实内容框要看切图项的 rect（见 sliceRect），据此降到 "low"。
+   */
+  rectConfidence?: "high" | "low";
+  /** 从子图层并集或切图项校正后的盒子，rectConfidence 为 low 时才有 */
+  sliceRect?: LayerRect;
   opacity?: number;
   fillOpacity?: number;
   /** 圆角，按 topLeft/topRight/bottomRight/bottomLeft 顺序 */
