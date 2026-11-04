@@ -16,6 +16,7 @@ import { attachSlices, DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveS
 import type { Layer, ShareInfo } from "./types.js";
 import { mapLimit } from "./utils/concurrency.js";
 import { createNamer } from "./utils/filename.js";
+import { assignRefs, collectUnreconstructable, projectLayers, type LayerView } from "./views.js";
 import { VERSION } from "./version.js";
 
 const COOKIE = process.env.CODESIGN_COOKIE || "";
@@ -74,26 +75,69 @@ server.registerTool(
   {
     title: "读取设计稿图层标注",
     description: [
-      "读取腾讯 CoDesign 设计稿：返回设计稿标题、团队、所有画板列表，",
-      "以及每个画板的完整图层标注（坐标、尺寸、字体、字号、字距、颜色、圆角、渐变、效果）。",
+      "读取腾讯 CoDesign 设计稿：返回设计稿标题、团队、画板列表与图层标注。",
       "支持分享链接和后台链接（/app/design/<设计ID>/board）。",
-      "说明：图层上若是 isBitmap=true，表示这是位图，设计稿没有矢量信息；",
-      "此时看 slice 字段：有 slice 就用 design_download_slices 下载后用图片还原，",
-      "没有 slice 则该图层细节无法还原，会在 unreconstructable 列表里列出。",
-      "这是还原设计稿的第一步，先用它拿到图层结构。",
+      "默认只返回第一个画板的精简图层列表（view=summary：ref/objectId/depth/name/type/z/rect/flags），",
+      "带 z（全局绘制顺序，越大越靠上）和 parentId，层级不再靠名字前的空格推断。",
+      "要更多信息按需升级：view=flat 补样式（css/text/fills/borders），view=tree 给嵌套结构；",
+      "只想看部分图层用 types 过滤、subtreeId 取子树、offset/limit 分页、fields 做字段投影。",
+      "isBitmap=true 的图层是位图，没有矢量信息：有 slice 就下载切图，",
+      "没有 slice 会列进 unreconstructable——这类图层可用 design_export(objectIds) 从合成图裁剪兜底。",
+      "多画板时需要全部画板请显式传 allScreens=true，默认只给第一块避免上下文被塞满。",
     ].join(""),
     inputSchema: {
       url: urlSchema,
       password: passwordSchema,
       screenId: screenIdSchema,
-      includeLayers: z.boolean().optional().describe("是否返回图层标注树，默认 true"),
+      screenName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("按画板名精确匹配，省去先查 screenId 的一步。"),
+      includeLayers: z.boolean().optional().describe("是否返回图层标注，默认 true"),
+      view: z
+        .enum(["summary", "flat", "tree"])
+        .optional()
+        .describe(
+          "图层视图，默认 summary（精简，最省上下文）。" +
+            "flat=补上 css/text/fills/borders 等样式细节；tree=保留嵌套结构（父子关系）。",
+        ),
+      fields: z
+        .array(z.string())
+        .optional()
+        .describe('字段投影，只保留指定字段。例如 ["rect","name","type","slice"]。objectId 永远保留。'),
+      subtreeId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("只返回该 objectId 的子树，适合先看整体再深入某个分组。"),
+      types: z
+        .array(z.string())
+        .optional()
+        .describe('按图层类型过滤，例如 ["text"] 只看文本、["group"] 只看分组。'),
+      offset: z.number().int().min(0).optional().describe("分页起点，默认 0"),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(20000)
+        .optional()
+        .describe("每页数量，默认 200（tree 视图 500）"),
+      includeBitmapLayers: z
+        .boolean()
+        .optional()
+        .describe("是否在 unreconstructable 里列出位图图层，默认 true；关掉可省体积。"),
+      allScreens: z
+        .boolean()
+        .optional()
+        .describe("是否返回全部画板，默认 false 只给第一块。多画板设计稿全量返回会非常大。"),
       maxLayers: z
         .number()
         .int()
         .positive()
         .max(20000)
         .optional()
-        .describe("每个画板最多返回多少图层，默认 800；超出会截断并标注 truncated"),
+        .describe("每个画板最多处理多少图层，默认不限；超出会截断"),
       maxDepth: z
         .number()
         .int()
@@ -312,23 +356,34 @@ async function handleDesignGet(args: {
   url: string;
   password?: string;
   screenId?: number;
+  screenName?: string;
   includeLayers?: boolean;
   maxLayers?: number;
   maxDepth?: number;
+  view?: LayerView;
+  fields?: string[];
+  subtreeId?: string;
+  types?: string[];
+  offset?: number;
+  limit?: number;
+  includeBitmapLayers?: boolean;
+  allScreens?: boolean;
 }) {
   const share = await loadShare(args.url, args.password);
   const includeLayers = args.includeLayers !== false;
+
+  // 未指定画板时默认只处理第一块：整份设计稿全部画板实测有 240KB+，
+  // 一次塞满上下文反而没法用。需要全量时显式传 allScreens。
+  const explicitId = resolveScreenId(share, args.screenId, args.screenName) ?? parseScreenId(args.url);
+  const screenId = explicitId ?? (args.allScreens ? undefined : pickFirstScreen(share));
+
   // 带上切图清单：位图图层本身没有矢量信息，只能靠切图还原，
   // 必须让 AI 知道哪些图层有切图可用
-  const targets = await resolveScreens(
-    client,
-    share,
-    args.screenId ?? parseScreenId(args.url),
-    { meta: includeLayers, slices: includeLayers, concurrency: CONCURRENCY },
-  );
-
-  const maxLayers = args.maxLayers ?? 800;
-  const maxDepth = args.maxDepth ?? Infinity;
+  const targets = await resolveScreens(client, share, screenId, {
+    meta: includeLayers,
+    slices: includeLayers,
+    concurrency: CONCURRENCY,
+  });
 
   const payload: any = {
     share: {
@@ -340,7 +395,6 @@ async function handleDesignGet(args: {
     screens: [] as any[],
   };
 
-  const bitmapNotes: string[] = [];
   // 警示信息可能同时来自截断、位图和缺少 Cookie 三处，统一收集避免后写的覆盖先写的
   const warnings: string[] = [];
 
@@ -352,39 +406,60 @@ async function handleDesignGet(args: {
       preview: t.detail.previewUrl,
       sliceCount: t.detail.slicesCount,
     };
+    // 接口的 slices_count 不可信（实测给 0 但实际有 13 条），如实标出原始值
+    if (t.detail.slicesCountReported !== undefined && t.detail.slicesCountReported !== t.detail.slicesCount) {
+      entry.sliceCountReported = t.detail.slicesCountReported;
+    }
 
     if (includeLayers && t.tree) {
       // 把切图信息挂到对应图层上，bitmap 图层才能被还原
-      const withSlices = attachSlices(t.tree.layers, t.slices ?? []);
-      const total = countLayers(withSlices);
-      const limited = limitTree(withSlices, maxLayers, maxDepth);
-      entry.layers = limited.layers;
-      entry.layerCount = total;
+      const withSlices = assignRefs(attachSlices(t.tree.layers, t.slices ?? []));
+      const limited =
+        args.maxDepth !== undefined || args.maxLayers !== undefined
+          ? limitTree(withSlices, args.maxLayers ?? 800, args.maxDepth ?? Infinity).layers
+          : withSlices;
 
-      // 统计无法矢量还原、也没有切图的图层，明确告诉 AI「这些做不到」
-      const missing = collectUnreconstructable(limited.layers);
+      const view = args.view ?? "summary";
+      const projected = projectLayers(limited, {
+        view,
+        fields: args.fields,
+        subtreeId: args.subtreeId,
+        types: args.types,
+        offset: args.offset,
+        limit: args.limit,
+      });
+      entry.layers = projected.tree ?? projected.layers;
+      entry.layerCount = countLayers(withSlices);
+      if (projected.filtered > 0) entry.filtered = projected.filtered;
+      if (projected.paging.total > projected.layers.length || projected.paging.offset > 0) {
+        entry.paging = projected.paging;
+      }
+
+      // 统计无法矢量还原、也没有切图的图层，完整列出而不是只举例。
+      // 指定了 subtreeId 时只统计该子树，否则整棵树的几十上百条会把省下来的体积又吐回去。
+      const missing =
+        args.includeBitmapLayers === false
+          ? []
+          : collectUnreconstructable(limited, args.subtreeId);
       if (missing.length) {
         entry.unreconstructable = missing;
-        bitmapNotes.push(
-          `${t.detail.name}：${missing.length} 个图层是位图且没有切图，无法还原细节（${missing
-            .slice(0, 5)
-            .map((m) => `${m.name}(${m.size})`)
-            .join("、")}${missing.length > 5 ? " 等" : ""}）`,
-        );
-      }
-      if (limited.truncated) {
-        entry.truncated = { returned: limited.returned, maxLayers, maxDepth: maxDepth === Infinity ? undefined : maxDepth };
-        // 截断是按单个画板算的，指定 screenId 并不会减少图层数，只有调大上限有用
-        warnings.push(
-          `${t.detail.name}：图层总数 ${total} 超过上限 ${maxLayers}，已截断。` +
-            "如需完整数据请调大 maxLayers；只想看部分图层可改用 types 过滤或 maxDepth 限制层级。",
-        );
+        entry.unreconstructableCount = missing.length;
+        entry.unreconstructableHint =
+          "这些图层是位图且没有切图。可用 design_export(objectIds) 从合成图裁剪（结果不透明），" +
+          "或请设计同学在 CoDesign 里补切图。";
       }
     }
     payload.screens.push(entry);
   }
 
-  if (bitmapNotes.length) warnings.push(...bitmapNotes);
+  // 权限字段与实际不符时提醒：实测 assetsDownloadable=false 但切图全部可下载
+  const totalSlices = targets.reduce((n, t) => n + t.detail.slicesCount, 0);
+  if (share.permissions.assetsDownloadable === false && totalSlices > 0) {
+    warnings.push(
+      `permissions.assetsDownloadable 为 false，但实测该设计稿有 ${totalSlices} 个切图可正常下载——` +
+        "这个字段不可信，请直接调用 design_download_slices 或 design_export 尝试。",
+    );
+  }
 
   // 未配 Cookie 时上面的信息本来就是残缺的，这条放最后但仍保留其余提示
   if (!client.hasCookie) {
@@ -770,28 +845,7 @@ function pickFirstScreen(share: ShareInfo): number | undefined {
   return listScreens(share)[0]?.id;
 }
 
-/**
- * 找出「位图且没有切图」的图层。
- * 这类图层设计稿只给盒子尺寸，没有可还原的样式信息，
- * 必须显式告诉调用方，否则 AI 会凭空猜。
- */
-function collectUnreconstructable(
-  layers: Layer[],
-  out: { objectId: string; name: string; size: string }[] = [],
-) {
-  for (const l of layers) {
-    if (l.isBitmap && !l.slice && l.visible) {
-      out.push({
-        objectId: l.objectId,
-        name: l.name || l.type,
-        size: `${l.rect.width}×${l.rect.height}`,
-      });
-    }
-    if (l.children?.length) collectUnreconstructable(l.children, out);
-  }
-  return out;
-}
-
+/** 统计整棵树的图层数（含隐藏层），用于告知调用方实际规模 */
 function countLayers(layers: Layer[]): number {
   return layers.reduce((n, l) => n + 1 + (l.children?.length ? countLayers(l.children) : 0), 0);
 }
@@ -840,8 +894,18 @@ function formatError(e: unknown): string {
   return `❌ ${e instanceof Error ? e.message : String(e)}`;
 }
 
+/** 超过这个体积就不再缩进输出——缩进对机器消费无意义，纯占上下文 */
+const PRETTY_LIMIT = 8000;
+
+/**
+ * 结果统一序列化成 JSON 文本。
+ * 小结果保留缩进便于人和模型扫读；大结果压缩成单行，
+ * 实测 800 图层的 payload 缩进版 484KB、单行 200KB，省掉 59%。
+ */
 function jsonResult(obj: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] };
+  const pretty = JSON.stringify(obj, null, 2);
+  const text = pretty.length > PRETTY_LIMIT ? JSON.stringify(obj) : pretty;
+  return { content: [{ type: "text" as const, text }] };
 }
 
 function errorResult(text: string) {
