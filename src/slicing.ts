@@ -169,7 +169,7 @@ export function planSlices(
       width: wantWidth,
       height,
       file,
-      downloadUrl: applyCdnOps(picked.export.downloadUrl, ops),
+      downloadUrl: appendImageOps(picked.export.downloadUrl, ops),
     });
   }
 
@@ -236,7 +236,7 @@ function formatScale(scale: number): string {
  * 其余操作（thumbnail/cut）可以正常追加。
  * svg 是矢量格式，任何 imageMogr2 操作都会报 400，原样返回。
  */
-function applyCdnOps(url: string, ops: string[]): string {
+export function appendImageOps(url: string, ops: string[]): string {
   if (!url || !ops.length) return url;
   if (/\.svgz?($|\?)/i.test(url)) return url;
 

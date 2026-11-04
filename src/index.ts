@@ -1,15 +1,20 @@
 #!/usr/bin/env node
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
 import { CoDesignClient, parseDesignId, parseScreenId, parseShareId } from "./client.js";
-import { isCoDesignError } from "./errors.js";
+import { CoDesignError, isCoDesignError } from "./errors.js";
+import { planLayerExports, planRegionExports, summarizeTiers, type RegionRequest } from "./export.js";
 import { summarize, toManifestEntries, writeManifest, type ManifestEntry } from "./manifest.js";
 import { buildSpec } from "./spec.js";
 import type { ExportFormat } from "./slicing.js";
 import { attachSlices, DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
 import type { Layer, ShareInfo } from "./types.js";
+import { mapLimit } from "./utils/concurrency.js";
 import { createNamer } from "./utils/filename.js";
 import { VERSION } from "./version.js";
 
@@ -52,6 +57,17 @@ const outDirSchema = z
   .min(1)
   .optional()
   .describe(`输出目录，默认 ${DEFAULT_OUT}`);
+const formatSchema = z
+  .enum(["png", "jpg", "webp"])
+  .optional()
+  .describe("输出格式：png 支持透明，webp 体积最小，jpg 不支持透明。默认 png。");
+const qualitySchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(100)
+  .optional()
+  .describe("jpg/webp 质量（1-100），对 png 无效。");
 
 server.registerTool(
   "design_get",
@@ -147,15 +163,76 @@ server.registerTool(
     description: [
       "下载画板的整图预览（PNG），供 AI 直接读图理解视觉设计。",
       "还原设计稿前建议先调这个，用视觉判断整体布局，再用 design_get 拿精确数值。",
+      "原图本身就是设计稿原始分辨率（如 750 宽），需要更大或更小时用 scale / targetWidth。",
     ].join(""),
     inputSchema: {
       url: urlSchema,
       password: passwordSchema,
       screenId: screenIdSchema,
       outDir: outDirSchema,
+      scale: z
+        .number()
+        .positive()
+        .optional()
+        .describe("预览图倍率，默认 1（原图）。传 2 则输出设计稿 2 倍尺寸，适合放大查看细节。"),
+      targetWidth: z.number().positive().optional().describe("目标像素宽，优先于 scale。"),
     },
   },
   async (args) => run(() => handleDownloadPreviews(args)),
+);
+
+server.registerTool(
+  "design_export",
+  {
+    title: "导出任意图层或区域",
+    description: [
+      "把任意图层或任意区域导出成图片，是「无法还原」图层的兜底方案。",
+      "按 objectIds 导出：图层有切图就拿原切图（tier=slice，透明）；",
+      "没有切图则从画板合成图上按图层盒子裁剪（tier=composite，**不透明**，会带上底层内容）。",
+      "按 regions 导出：给设计稿坐标的矩形，直接裁画板合成图。",
+      "objectIds 与 regions 二选一，必须传其中一个。",
+      "重要：composite 结果会带上被遮挡的底层内容，不能当作透明素材使用；",
+      "返回体的 opaque 字段会标出来，warnings 里也会提示。",
+      "导出结果同样写入 codesign-manifest.json / .csv。",
+    ].join(""),
+    inputSchema: {
+      url: urlSchema,
+      password: passwordSchema,
+      screenId: screenIdSchema,
+      screenName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("按画板名精确匹配，省去先调 design_get 查 screenId 的一步（多画板时很有用）。"),
+      outDir: outDirSchema,
+      objectIds: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("要导出的图层 objectId 列表（design_get 返回的 objectId 字段）。"),
+      regions: z
+        .array(
+          z.object({
+            name: z.string().optional().describe("输出文件名用的名字"),
+            objectId: z.string().optional().describe("关联的图层 objectId，便于清单对齐"),
+            x: z.number().describe("左边界，设计稿坐标"),
+            y: z.number().describe("上边界，设计稿坐标"),
+            width: z.number().positive().describe("宽度，设计稿像素"),
+            height: z.number().positive().describe("高度，设计稿像素"),
+          }),
+        )
+        .optional()
+        .describe("要导出的矩形区域列表，坐标为设计稿原始像素（不是 CSS 缩放后的值）。"),
+      scale: z
+        .number()
+        .positive()
+        .optional()
+        .describe(`目标倍率，默认 ${DEFAULT_SCALE}。导出图尺寸 = 设计稿尺寸 × 该倍率。`),
+      targetWidth: z.number().positive().optional().describe("目标像素宽，优先于 scale。"),
+      format: formatSchema,
+      quality: qualitySchema,
+    },
+  },
+  async (args) => run(() => handleExport(args)),
 );
 
 server.registerTool(
@@ -433,6 +510,8 @@ async function handleDownloadPreviews(args: {
   password?: string;
   screenId?: number;
   outDir?: string;
+  scale?: number;
+  targetWidth?: number;
 }) {
   const share = await loadShare(args.url, args.password);
   // 预览只需要画板详情，不必拉图层树和切图清单
@@ -443,9 +522,195 @@ async function handleDownloadPreviews(args: {
   const outDir = args.outDir || DEFAULT_OUT;
   const files = await downloadPreviews(client, targets, outDir, {
     concurrency: CONCURRENCY,
+    scale: args.scale,
+    targetWidth: args.targetWidth,
   });
   const failed = files.filter((f) => !f.ok).length;
   return jsonResult({ outDir, total: files.length - failed, failed, files });
+}
+
+/** 按图层 / 区域导出，是「位图且没有切图」图层的兜底 */
+async function handleExport(args: {
+  url: string;
+  password?: string;
+  screenId?: number;
+  screenName?: string;
+  outDir?: string;
+  objectIds?: string[];
+  regions?: RegionRequest[];
+  scale?: number;
+  targetWidth?: number;
+  format?: ExportFormat;
+  quality?: number;
+}) {
+  const hasLayers = Boolean(args.objectIds?.length);
+  const hasRegions = Boolean(args.regions?.length);
+  if (!hasLayers && !hasRegions) {
+    throw new CoDesignError("需要指定要导出的内容", undefined, [
+      "objectIds 与 regions 二选一：",
+      "  objectIds: [\"12\", \"46\"]   按图层导出（有切图拿切图，没有则裁合成图）",
+      "  regions: [{ x: 0, y: 0, width: 750, height: 1141 }]   按区域导出",
+      "图层 objectId 可用 design_get 拿到。",
+    ].join("\n"));
+  }
+  if (hasLayers && hasRegions) {
+    throw new CoDesignError("objectIds 与 regions 不能同时传", undefined, "请分两次调用，或用其中一种方式。");
+  }
+
+  const share = await loadShare(args.url, args.password);
+  const screenId = resolveScreenId(share, args.screenId, args.screenName) ?? parseScreenId(args.url);
+  const targets = await resolveScreens(client, share, screenId, {
+    meta: true,
+    slices: true,
+    concurrency: CONCURRENCY,
+  });
+
+  const outDir = args.outDir || DEFAULT_OUT;
+  const namer = createNamer();
+  const results: any[] = [];
+  const manifestEntries: ManifestEntry[] = [];
+  const warnings: string[] = [];
+
+  for (const t of targets) {
+    const dir = targets.length > 1 ? `${outDir}/${sanitize(t.detail.name)}` : outDir;
+    await mkdir(dir, { recursive: true });
+
+    const plans = hasLayers
+      ? planLayerExports(args.objectIds!, t.tree?.layers ?? [], t.slices ?? [], t.detail, {
+          scale: args.scale,
+          targetWidth: args.targetWidth,
+          format: args.format,
+          quality: args.quality,
+          namer,
+        })
+      : planRegionExports(args.regions!, t.detail, {
+          scale: args.scale,
+          targetWidth: args.targetWidth,
+          format: args.format,
+          quality: args.quality,
+          namer,
+        });
+
+    const files = await mapLimit(plans, CONCURRENCY, async (plan) => {
+      if (plan.tier === "fail" || !plan.downloadUrl) {
+        return {
+          name: plan.name,
+          path: "",
+          ref: plan.ref,
+          objectId: plan.objectId,
+          rect: plan.rect,
+          z: plan.z,
+          format: plan.format,
+          tier: plan.tier,
+          opaque: plan.opaque || undefined,
+          width: 0,
+          height: 0,
+          bytes: 0,
+          ok: false,
+          error: plan.reason ?? "导出失败",
+        };
+      }
+      try {
+        const buf = await client.downloadImage(plan.downloadUrl);
+        await writeFile(join(dir, plan.file), buf);
+        return {
+          name: plan.name,
+          path: plan.file,
+          ref: plan.ref,
+          objectId: plan.objectId,
+          rect: plan.rect,
+          z: plan.z,
+          format: plan.format,
+          tier: plan.tier,
+          opaque: plan.opaque || undefined,
+          exportScale: plan.exportScale,
+          targetScale: plan.targetScale,
+          resampled: plan.resampled || undefined,
+          width: plan.width,
+          height: plan.height,
+          bytes: buf.length,
+          ok: true,
+        };
+      } catch (e) {
+        return {
+          name: plan.name,
+          path: plan.file,
+          ref: plan.ref,
+          objectId: plan.objectId,
+          rect: plan.rect,
+          z: plan.z,
+          format: plan.format,
+          tier: plan.tier,
+          opaque: plan.opaque || undefined,
+          width: plan.width,
+          height: plan.height,
+          bytes: 0,
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
+    });
+
+    results.push({ screen: t.detail.name, dir, files });
+    manifestEntries.push(...toManifestEntries(files as any, { id: t.detail.id, name: t.detail.name }));
+
+    const composite = (files as any[]).filter((f) => f.tier === "composite" && f.ok);
+    if (composite.length) {
+      warnings.push(
+        `${t.detail.name}：${composite.length} 个图层没有切图，已从合成图裁剪（tier=composite）。` +
+          "这些图**不透明**，会带上被遮挡的底层内容，不能当透明素材用。",
+      );
+    }
+  }
+
+  const allFiles = results.flatMap((r) => r.files);
+  const failed = allFiles.filter((f) => !f.ok).length;
+  const manifest = await writeManifest(outDir, {
+    meta: {
+      version: VERSION,
+      generatedAt: new Date().toISOString(),
+      outDir,
+      targetScale: args.scale ?? DEFAULT_SCALE,
+      total: manifestEntries.length,
+    },
+    entries: manifestEntries,
+  });
+
+  return jsonResult({
+    outDir,
+    total: allFiles.length - failed,
+    failed,
+    byTier: summarizeTiers(
+      allFiles.map((f) => ({ tier: f.tier })) as any,
+    ),
+    bytes: summarize(manifestEntries).bytes,
+    manifest: {
+      path: manifest.path,
+      csvPath: manifest.csvPath,
+      total: manifestEntries.length,
+      preview: manifestEntries.slice(0, 50),
+      truncated: manifestEntries.length > 50 || undefined,
+    },
+    screens: results,
+    ...(warnings.length ? { warnings } : {}),
+  });
+}
+
+/** 按画板名定位；没有同名画板时把可选项列出来 */
+function resolveScreenId(
+  share: ShareInfo,
+  screenId?: number,
+  screenName?: string,
+): number | undefined {
+  if (screenId || !screenName) return screenId;
+  const all = listScreens(share);
+  const hit = all.find((s) => s.name === screenName);
+  if (hit) return hit.id;
+  throw new CoDesignError(
+    `没有名为「${screenName}」的画板`,
+    undefined,
+    "可用画板：\n" + all.map((s) => `  ${s.id}  ${s.name}`).join("\n"),
+  );
 }
 
 async function handleGetSpec(args: {
