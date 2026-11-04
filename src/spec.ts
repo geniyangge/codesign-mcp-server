@@ -148,8 +148,12 @@ function effectsToBoxShadow(effects: NonNullable<Layer["effects"]>, scale: numbe
   for (const fx of effects) {
     const color = colorOf(fx.color, fx.opacity);
     const blur = num(fx.blur) ?? num(fx.size);
-    const offsetX = num(fx.distance) ?? 0;
-    const offsetY = num(fx.distance) ?? 0;
+    // PS 的投影用 distance + angle 表达方向（angle 0° = 正右，顺时针），
+    // 直接拿 distance 当 X/Y 会让阴影永远朝右下
+    const distance = num(fx.distance) ?? 0;
+    const angle = num(fx.angle);
+    const offsetX = angle === undefined ? distance : distance * Math.cos((angle * Math.PI) / 180);
+    const offsetY = angle === undefined ? distance : distance * Math.sin((angle * Math.PI) / 180);
 
     if (fx.type === "innerGlow") {
       const inset = "inset";
