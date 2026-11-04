@@ -6,10 +6,13 @@ import type {
   SpecNode,
   SpecResult,
 } from "./types.js";
-import { createNamer, sanitizeFilename } from "./utils/filename.js";
+import { planSlices, type ExportFormat } from "./slicing.js";
+import { createNamer } from "./utils/filename.js";
 
 const DESIGN_WIDTH = 750;
 const CSS_WIDTH = 375;
+/** 切图规划默认倍率（spec 只描述切图位置，不影响坐标换算） */
+const DEFAULT_SPEC_SCALE = 2;
 
 /** tracking 是 Photoshop 千分之一单位，换算成 CSS letter-spacing */
 function trackingToPx(tracking: number | undefined, size: number): number | undefined {
@@ -203,6 +206,13 @@ export interface SpecOptions {
   maxLayers?: number;
   /** 最多下钻几层 */
   maxDepth?: number;
+  /** 切图目标倍率，默认 2；与下载接口传同样的值才能保证文件名一致 */
+  scale?: number;
+  /** 切图目标像素宽，优先于 scale */
+  targetWidth?: number;
+  /** 切图输出格式 */
+  format?: ExportFormat;
+  quality?: number;
   /** 切图命名器：传入下载时用过的同一个，保证文件名一致 */
   namer?: ReturnType<typeof createNamer>;
 }
@@ -247,25 +257,40 @@ export function buildSpec(
     text: layer.text?.content,
   }));
 
-  // 切图按 objectId 关联图层，能带上图层自身的盒子和样式（组图层没有 css）
+  // 切图规划与下载共用同一份逻辑：只输出被选中的那一档，文件名也由它分配，
+  // 否则会出现 spec 说 icon_2.png、实际落盘却叫 icon.png 的分叉
   const byObjectId = new Map(flat.map(({ layer }) => [layer.objectId, layer]));
-  const sliceSpec = slices.flatMap((s) =>
-    s.exports.map((ex) => {
-      // 用与下载一致的命名器分配文件名，避免 design_download_slices 落盘名字对不上
-      const layer = byObjectId.get(String(s.id)) ?? byObjectId.get(String(ex.objectId));
-      return {
-        name: s.name,
-        objectId: s.id,
-        left: Number((s.rect.x * scale).toFixed(2)),
-        top: Number((s.rect.y * scale).toFixed(2)),
-        width: Number((s.rect.width * scale).toFixed(2)),
-        height: Number((s.rect.height * scale).toFixed(2)),
-        scale: ex.scale,
-        file: namer(sanitizeFilename(s.name, "slice"), ex.format),
-        ...(layer?.css?.length ? { style: layer.css.map((c) => scaleCssValue(c, scale)) } : {}),
-      };
-    }),
-  );
+  const sliceSpec = planSlices(slices, tree.layers, {
+    scale: opts.scale ?? DEFAULT_SPEC_SCALE,
+    targetWidth: opts.targetWidth,
+    format: opts.format,
+    quality: opts.quality,
+    namer,
+  }).map((p) => {
+    // 组图层没有 css，能拿到图层自身的样式就一并带上
+    const layer = byObjectId.get(String(p.objectId));
+    return {
+      name: p.name,
+      objectId: p.objectId,
+      left: Number((p.rect.x * scale).toFixed(2)),
+      top: Number((p.rect.y * scale).toFixed(2)),
+      width: Number((p.rect.width * scale).toFixed(2)),
+      height: Number((p.rect.height * scale).toFixed(2)),
+      // 设计稿坐标下的原始像素宽高，便于对照 manifest
+      designWidth: Math.round(p.rect.width),
+      designHeight: Math.round(p.rect.height),
+      scale: p.targetScale,
+      exportScale: p.exportScale,
+      targetScale: p.targetScale,
+      resampled: p.resampled || undefined,
+      ref: p.ref,
+      z: p.z,
+      pixelWidth: p.width,
+      pixelHeight: p.height,
+      file: p.file,
+      ...(layer?.css?.length ? { style: layer.css.map((c) => scaleCssValue(c, scale)) } : {}),
+    };
+  });
 
   const maxDepthReached = flat.reduce((m, x) => Math.max(m, x.depth), 0);
   const notes: string[] = [
