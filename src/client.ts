@@ -785,6 +785,11 @@ function normalizeLayer(l: any): Layer {
     css: Array.isArray(l.css) ? l.css.map(String) : typeof l.css === "string" ? [l.css] : undefined,
   };
 
+  // 父节点直接用源数据的 parent_id，留给上层建树和输出 depth/parentId
+  if (l.parent_id !== undefined && l.parent_id !== null && String(l.parent_id) !== "") {
+    layer.parentId = String(l.parent_id);
+  }
+
   if (l.rotation) layer.rotation = l.rotation;
   if (l.fillOpacity ?? l.fillopacity) layer.fillOpacity = normalizeOpacity(l.fillOpacity ?? l.fillopacity);
   if (l.clipped) layer.clipped = true;

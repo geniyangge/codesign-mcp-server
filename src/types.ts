@@ -99,6 +99,10 @@ export interface Layer {
   id: string;
   /** CoDesign 的 object_id，切图清单里用它关联图层 */
   objectId: string;
+  /** 本次结果内的稳定短标识（L1、L2…），对话里引用它比中文名省事 */
+  ref?: string;
+  /** 父图层 objectId，替代原先靠缩进空格推断层级的做法 */
+  parentId?: string;
   name: string;
   type: string;
   rect: LayerRect;
