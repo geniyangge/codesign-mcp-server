@@ -104,7 +104,7 @@ test("buildSpec 按 maxDepth 截断子树", () => {
   );
 });
 
-test("buildSpec 的切图文件名与下载共用命名器，同名自动加序号", () => {
+test("buildSpec 的切图文件名带倍率后缀且与下载共用命名器", () => {
   const slices: SliceItem[] = [
     {
       id: "a",
@@ -123,8 +123,29 @@ test("buildSpec 的切图文件名与下载共用命名器，同名自动加序�
   const spec = buildSpec(screen, tree([]), slices, { namer: createNamer() });
   assert.deepEqual(
     spec.slices.map((s) => s.file),
-    ["icon_home.png", "icon_home_2.png"],
+    ["icon_home@2x.png", "icon_home@2x_2.png"],
   );
+});
+
+test("buildSpec 每个图层只输出被选中的那一档倍率", () => {
+  // 回归：旧实现把同一图层所有倍率都列出来并各分配文件名，
+  // 但下载只挑一档，导致 spec 提示的文件名在实际落盘里根本不存在
+  const multi: SliceItem[] = [
+    {
+      id: "a",
+      name: "多倍率",
+      rect: { x: 0, y: 0, width: 40, height: 40 },
+      exports: [
+        { name: "1x", scale: 1, format: "png", width: 40, height: 40, downloadUrl: "", objectId: "a" },
+        { name: "2x", scale: 2, format: "png", width: 80, height: 80, downloadUrl: "", objectId: "a" },
+        { name: "3x", scale: 3, format: "png", width: 120, height: 120, downloadUrl: "", objectId: "a" },
+      ],
+    },
+  ];
+  const spec = buildSpec(screen, tree([]), multi, { namer: createNamer(), scale: 2 });
+  assert.equal(spec.slices.length, 1, "只应输出被选中的那一档");
+  assert.equal(spec.slices[0].file, "多倍率@2x.png");
+  assert.equal(spec.slices[0].exportScale, 2);
 });
 
 test("buildSpec 输出圆角、透明度与旋转", () => {
