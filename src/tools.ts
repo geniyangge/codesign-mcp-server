@@ -85,6 +85,9 @@ export async function resolveScreens(
       slices && detailInfo.slicesUrl ? client.getSlices(detailInfo.slicesUrl) : undefined,
     ]);
 
+    // 接口的 slices_count 不可信（实测给 0 但清单实返 13 条），有清单就以它为准
+    if (sliceList) detailInfo.slicesCount = sliceList.length;
+
     return { designId: t.designId, detail: detailInfo, tree, slices: sliceList };
   });
 }

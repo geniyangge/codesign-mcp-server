@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CoDesignClient, toCdnUrl } from "../src/client.js";
+import { buildLayerTree, CoDesignClient, toCdnUrl } from "../src/client.js";
 
 test("toCdnUrl 保留签名参数顺序（回归：不能重排 OSS 签名）", () => {
   const out = toCdnUrl("https://cdn4.codesign.qq.com/x.png?a=1&b=2");

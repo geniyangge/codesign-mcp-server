@@ -7,7 +7,7 @@ import { CoDesignClient, parseDesignId, parseScreenId, parseShareId } from "./cl
 import { isCoDesignError } from "./errors.js";
 import { buildSpec } from "./spec.js";
 import { attachSlices, DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
-import type { Layer } from "./types.js";
+import type { Layer, ShareInfo } from "./types.js";
 import { createNamer } from "./utils/filename.js";
 import { VERSION } from "./version.js";
 
@@ -232,6 +232,8 @@ async function handleDesignGet(args: {
   };
 
   const bitmapNotes: string[] = [];
+  // 警示信息可能同时来自截断、位图和缺少 Cookie 三处，统一收集避免后写的覆盖先写的
+  const warnings: string[] = [];
 
   for (const t of targets) {
     const entry: any = {
@@ -261,25 +263,26 @@ async function handleDesignGet(args: {
             .join("、")}${missing.length > 5 ? " 等" : ""}）`,
         );
       }
-
       if (limited.truncated) {
         entry.truncated = { returned: limited.returned, maxLayers, maxDepth: maxDepth === Infinity ? undefined : maxDepth };
-        payload.warning =
-          `图层总数 ${total} 超过上限 ${maxLayers}，已截断。` +
-          "如需完整数据，可指定 screenId 逐个读取，或调大 maxLayers。";
+        // 截断是按单个画板算的，指定 screenId 并不会减少图层数，只有调大上限有用
+        warnings.push(
+          `${t.detail.name}：图层总数 ${total} 超过上限 ${maxLayers}，已截断。` +
+            "如需完整数据请调大 maxLayers；只想看部分图层可改用 types 过滤或 maxDepth 限制层级。",
+        );
       }
     }
     payload.screens.push(entry);
   }
 
-  if (bitmapNotes.length) {
-    payload.warning = [payload.warning, ...bitmapNotes].filter(Boolean).join("\n");
+  if (bitmapNotes.length) warnings.push(...bitmapNotes);
+
+  // 未配 Cookie 时上面的信息本来就是残缺的，这条放最后但仍保留其余提示
+  if (!client.hasCookie) {
+    warnings.push("未配置 COOKIE，只返回了基础信息。要读取图层标注和切图，请设置环境变量 CODESIGN_COOKIE。");
   }
 
-  if (!client.hasCookie) {
-    payload.warning =
-      "未配置 COOKIE，只返回了基础信息。要读取图层标注和切图，请设置环境变量 CODESIGN_COOKIE。";
-  }
+  if (warnings.length) payload.warning = warnings.join("\n");
 
   return jsonResult(payload);
 }
@@ -366,17 +369,17 @@ async function handleGetSpec(args: {
 }) {
   const share = await loadShare(args.url, args.password);
   const explicit = args.screenId ?? parseScreenId(args.url);
-  const targets = await resolveScreens(client, share, explicit, {
+  // 未指定画板时只输出第一个。必须先挑再拉，否则会把每个画板的图层树和切图清单都下载一遍再丢掉
+  const picked = explicit ? undefined : pickFirstScreen(share);
+  const targets = await resolveScreens(client, share, explicit ?? picked, {
     meta: true,
     slices: true,
     concurrency: CONCURRENCY,
   });
-  // 未指定画板时只输出第一个，避免多画板时结果过长
-  const picked = explicit ? targets : targets.slice(0, 1);
 
   // 规格与下载共用同一套命名规则，保证 file 字段和实际落盘一致
   const namer = createNamer();
-  const specs = picked.map((t) => {
+  const specs = targets.map((t) => {
     // 关联切图，位图图层才能知道「有切图可用」而不是「信息缺失」
     const linked = { ...t.tree!, layers: attachSlices(t.tree!.layers, t.slices ?? []) };
     return buildSpec(t.detail, linked, t.slices ?? [], {
@@ -389,10 +392,24 @@ async function handleGetSpec(args: {
   return jsonResult({
     title: share.title,
     count: specs.length,
-    totalScreens: targets.length,
-    ...(explicit ? {} : { screenIds: targets.map((t) => ({ id: t.detail.id, name: t.detail.name })) }),
+    totalScreens: countScreens(share),
+    ...(explicit ? {} : { screenIds: listScreens(share) }),
     specs,
   });
+}
+
+/** 全部画板的 id/name，供调用方决定下一步指定哪个 */
+function listScreens(share: ShareInfo) {
+  return share.designs.flatMap((d) => d.screens).map((s) => ({ id: s.id, name: s.name }));
+}
+
+function countScreens(share: ShareInfo): number {
+  return share.designs.reduce((n, d) => n + d.screens.length, 0);
+}
+
+/** 取第一个画板的 id，用于「未指定画板」时只处理单块 */
+function pickFirstScreen(share: ShareInfo): number | undefined {
+  return listScreens(share)[0]?.id;
 }
 
 /**
