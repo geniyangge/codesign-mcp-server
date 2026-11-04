@@ -5,7 +5,9 @@ import { z } from "zod";
 
 import { CoDesignClient, parseDesignId, parseScreenId, parseShareId } from "./client.js";
 import { isCoDesignError } from "./errors.js";
+import { summarize, toManifestEntries, writeManifest, type ManifestEntry } from "./manifest.js";
 import { buildSpec } from "./spec.js";
+import type { ExportFormat } from "./slicing.js";
 import { attachSlices, DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
 import type { Layer, ShareInfo } from "./types.js";
 import { createNamer } from "./utils/filename.js";
@@ -93,13 +95,15 @@ server.registerTool(
   {
     title: "下载切图",
     description: [
-      "批量下载 CoDesign 画板的切图。",
-      "自动把 OSS 签名地址转换为可下载的 CDN 地址，按图层名命名文件，同名自动加序号。",
+      "批量下载 CoDesign 画板的切图，并输出 codesign-manifest.json / .csv 清单。",
+      "自动把 OSS 签名地址转换为可下载的 CDN 地址，文件名统一为「图层名@倍率x」，同名自动加序号。",
       `默认导出 ${DEFAULT_SCALE} 倍图。`,
       "重要：如果用户在对话里明确说了要几倍图（例如「要 3 倍图」「导出 @2x」），",
       "必须把倍数传给 scale 参数，用户指定的优先级高于默认值。",
-      "某图层若没有该倍率的导出，会就近取其他倍率并在 warning 里列出，不会静默替换。",
-      "返回每个文件的相对路径、像素尺寸、字节数和实际倍率。",
+      "设计稿没有目标倍率时会由服务端重采样到目标尺寸（resampled=true），",
+      "所以落盘尺寸永远等于「设计稿宽 × 目标倍率」，不会拿到偏大的图。",
+      "需要 jpg/webp 或更小的图时传 format / quality / targetWidth。",
+      "返回每个文件的 ref、objectId、坐标、倍率与像素尺寸；清单文件可用于批量核对。",
     ].join(""),
     inputSchema: {
       url: urlSchema,
@@ -113,8 +117,24 @@ server.registerTool(
         .describe(
           `导出倍率，默认 ${DEFAULT_SCALE}。` +
             "用户明确要求几倍图时务必传这个参数（如用户说「3 倍图」就传 3）。" +
-            "该图层没有指定倍率时会就近取并在 warning 中说明。",
+            "该图层没有指定倍率时会由服务端重采样到目标尺寸，并在 warning 中说明。",
         ),
+      targetWidth: z
+        .number()
+        .positive()
+        .optional()
+        .describe("目标像素宽，优先于 scale。例如只想要 200px 宽的图就传 200。"),
+      format: z
+        .enum(["png", "jpg", "webp"])
+        .optional()
+        .describe("输出格式，默认沿用切图自带格式（通常是 png）。webp 体积最小，jpg 不支持透明。"),
+      quality: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("jpg/webp 质量（1-100），对 png 无效。"),
     },
   },
   async (args) => run(() => handleDownloadSlices(args)),
@@ -171,6 +191,18 @@ server.registerTool(
         .max(50)
         .optional()
         .describe("最多下钻几层图层，默认不限"),
+      scale: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          `切图目标倍率，默认 ${DEFAULT_SCALE}。` +
+            "要与 design_download_slices 传同一个值，spec 里给出的切图文件名才和实际落盘一致。",
+        ),
+      format: z
+        .enum(["png", "jpg", "webp"])
+        .optional()
+        .describe("切图输出格式，同样要与 design_download_slices 保持一致。"),
     },
   },
   async (args) => run(() => handleGetSpec(args)),
@@ -293,48 +325,105 @@ async function handleDownloadSlices(args: {
   screenId?: number;
   outDir?: string;
   scale?: number;
+  targetWidth?: number;
+  format?: ExportFormat;
+  quality?: number;
 }) {
   const share = await loadShare(args.url, args.password);
   const targets = await resolveScreens(client, share, args.screenId ?? parseScreenId(args.url), {
     slices: true,
+    meta: true,
     concurrency: CONCURRENCY,
   });
 
   const outDir = args.outDir || DEFAULT_OUT;
   const results: any[] = [];
+  // 全局共享命名器：多画板时才不会互相覆盖同名文件
+  const namer = createNamer();
+  const manifestEntries: ManifestEntry[] = [];
 
   for (const t of targets) {
     // 多画板时每个画板一个子目录，目录内各自去重
     const dir = targets.length > 1 ? `${outDir}/${sanitize(t.detail.name)}` : outDir;
     const downloaded = await downloadSlices(client, t.slices ?? [], dir, {
       scale: args.scale,
+      targetWidth: args.targetWidth,
+      format: args.format,
+      quality: args.quality,
       concurrency: CONCURRENCY * 2,
+      namer,
+      layers: t.tree?.layers,
     });
     results.push({ screen: t.detail.name, dir, files: downloaded });
+
+    // 清单以 ref + objectId 为主键，文件名只是落盘结果
+    manifestEntries.push(...toManifestEntries(downloaded, { id: t.detail.id, name: t.detail.name }));
   }
 
   const total = results.reduce((n, r) => n + r.files.filter((f: any) => f.ok).length, 0);
   const failed = results.reduce((n, r) => n + r.files.filter((f: any) => !f.ok).length, 0);
 
-  // 汇总实际用到的倍率：某个图层没有请求倍率时会被就近替换，这里如实反馈
+  // 汇总倍率：区分「重采样对齐」与「就近取档」两种情况
   const requestedScale = args.scale ?? DEFAULT_SCALE;
   const scaleUsage: Record<string, number> = {};
   const substituted: { name: string; scale: number }[] = [];
+  const resampled: { name: string; from: number; to: number }[] = [];
   for (const r of results) {
     for (const f of r.files) {
-      if (!f.ok || f.scale === undefined) continue;
+      if (f.scale === undefined) continue;
       scaleUsage[String(f.scale)] = (scaleUsage[String(f.scale)] ?? 0) + 1;
       if (f.substituted) substituted.push({ name: f.name, scale: f.scale });
+      if (f.resampled && f.exportScale !== f.targetScale) {
+        resampled.push({ name: f.name, from: f.exportScale, to: f.targetScale });
+      }
     }
   }
 
-  const payload: any = { outDir, requestedScale, total, failed, scaleUsage, screens: results };
+  const manifest = await writeManifest(outDir, {
+    meta: {
+      version: VERSION,
+      generatedAt: new Date().toISOString(),
+      outDir,
+      targetScale: requestedScale,
+      total: manifestEntries.length,
+    },
+    entries: manifestEntries,
+  });
+
+  const summary = summarize(manifestEntries);
+  const warnings: string[] = [];
   if (substituted.length) {
-    payload.warning =
-      `以下 ${substituted.length} 张切图在设计稿里没有 ${requestedScale} 倍导出，已就近取其他倍率：\n` +
-      substituted.map((s) => `  ${s.name} → ${s.scale}x`).join("\n") +
-      "\n如需严格匹配，请确认设计稿里该图层导出的倍率。";
+    warnings.push(
+      `以下 ${substituted.length} 张切图在设计稿里没有 ${requestedScale} 倍导出，已就近取档：\n` +
+        substituted.map((s) => `  ${s.name} → ${s.scale}x`).join("\n"),
+    );
   }
+  if (resampled.length) {
+    warnings.push(
+      `以下 ${resampled.length} 张切图已由服务端重采样到 ${requestedScale}x，落盘尺寸按目标倍率对齐：\n` +
+        resampled.map((s) => `  ${s.name}: ${s.from}x → ${s.to}x`).join("\n"),
+    );
+  }
+
+  const payload: any = {
+    outDir,
+    requestedScale,
+    format: args.format ?? "png",
+    total,
+    failed,
+    scaleUsage,
+    bytes: summary.bytes,
+    manifest: {
+      path: manifest.path,
+      csvPath: manifest.csvPath,
+      total: manifestEntries.length,
+      // 清单可能比返回体更适合批量核对，这里只给前若干条概览
+      preview: manifestEntries.slice(0, 50),
+      truncated: manifestEntries.length > 50 || undefined,
+    },
+    screens: results,
+  };
+  if (warnings.length) payload.warning = warnings.join("\n");
 
   return jsonResult(payload);
 }
@@ -366,6 +455,8 @@ async function handleGetSpec(args: {
   cssWidth?: number;
   maxLayers?: number;
   maxDepth?: number;
+  scale?: number;
+  format?: ExportFormat;
 }) {
   const share = await loadShare(args.url, args.password);
   const explicit = args.screenId ?? parseScreenId(args.url);
@@ -386,6 +477,8 @@ async function handleGetSpec(args: {
       cssWidth: args.cssWidth,
       maxLayers: args.maxLayers,
       maxDepth: args.maxDepth,
+      scale: args.scale ?? DEFAULT_SCALE,
+      format: args.format,
       namer,
     });
   });

@@ -520,11 +520,18 @@ function sleep(ms: number) {
 }
 
 /**
- * 把 OSS 直链换成可下载的 CDN 直链。
+ * 把 OSS 直链换成可下载的 CDN 直链，并挂上腾讯云图片处理操作。
  * 注意：`imageMogr2` 是腾讯云图片处理参数，只能处理位图；
  * 对 svg 这类矢量格式会直接报 `InvalidImageFormat` 400，必须跳过。
+ *
+ * `ops` 会拼成 `imageMogr2/<op1>/<op2>/...`，未传时保持历史上的 `format/png`。
  */
-export function toCdnUrl(url: string, cdnHost = DEFAULT_CDN_HOST, format?: string): string {
+export function toCdnUrl(
+  url: string,
+  cdnHost = DEFAULT_CDN_HOST,
+  format?: string,
+  ops: string[] = ["format/png"],
+): string {
   if (!url) return "";
   try {
     const u = new URL(url);
@@ -532,13 +539,13 @@ export function toCdnUrl(url: string, cdnHost = DEFAULT_CDN_HOST, format?: strin
     // cdn4.codesign.qq.com 走腾讯云图片服务，位图必须带 imageMogr2 才放行
     if (/^cdn\d*\.codesign\.qq\.com$/.test(u.hostname)) {
       if (isVector) return url;
-      return /imageMogr2/.test(url) ? url : appendImageMogr2(url, u);
+      return /imageMogr2/.test(url) ? url : appendImageMogr2(url, u, ops);
     }
     // OSS 签名直链：换域名 + 补参数
     const host = cdnHost.replace(/\/$/, "");
     const rebuilt = `${host}${u.pathname}${u.search}`;
     if (isVector) return rebuilt;
-    return appendImageMogr2(rebuilt, u);
+    return appendImageMogr2(rebuilt, u, ops);
   } catch {
     return url;
   }
@@ -549,9 +556,10 @@ function isVectorFormat(format?: string): boolean {
 }
 
 /** 追加 imageMogr2 时按 URL 解析结果判断分隔符，避免签名链接里已带 ? 时拼错 */
-function appendImageMogr2(url: string, parsed: URL): string {
+function appendImageMogr2(url: string, parsed: URL, ops: string[]): string {
   const sep = parsed.search ? "&" : "?";
-  return `${url}${sep}imageMogr2/format/png`;
+  const chain = ops.filter(Boolean).join("/");
+  return `${url}${sep}imageMogr2${chain ? `/${chain}` : ""}`;
 }
 
 // ---------------------------------------------------------------------------

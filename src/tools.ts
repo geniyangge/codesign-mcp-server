@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { CoDesignClient } from "./client.js";
 import { CoDesignError } from "./errors.js";
+import { planSlices, type ExportFormat } from "./slicing.js";
 import type {
   DownloadResult,
   Layer,
@@ -115,6 +116,8 @@ export interface PickedExport {
  *
  * 若该图层没有正好这个倍率：就近取**不超过**目标的最高档，再退而取最低档，
  * 并把 `substituted` 标出来，由上层如实告知，不静默替换。
+ *
+ * 选择逻辑已收敛到 `slicing.ts`，这里只保留返回数组的形状供既有调用方使用。
  */
 export function pickExports(item: SliceItem, scale?: number): PickedExport[] {
   if (!item.exports.length) return [];
@@ -139,9 +142,17 @@ export function pickExports(item: SliceItem, scale?: number): PickedExport[] {
 
 export interface DownloadOptions {
   scale?: number;
+  /** 目标像素宽，优先于 scale */
+  targetWidth?: number;
+  /** 输出格式 */
+  format?: ExportFormat;
+  /** jpg/webp 质量 */
+  quality?: number;
   concurrency?: number;
   /** 同一目录内共享命名器，跨画板/跨批次去重 */
   namer?: ReturnType<typeof createNamer>;
+  /** 图层树，用于把切图项和真实内容框、z 值对上 */
+  layers?: Layer[];
 }
 
 /** 把切图清单挂到图层树上，按 object_id 关联 */
@@ -182,36 +193,57 @@ export async function downloadSlices(
   await mkdir(outDir, { recursive: true });
   const namer = options.namer ?? createNamer();
 
-  const tasks = slices.flatMap((item) =>
-    pickExports(item, options.scale).map((p) => ({ item, ex: p.export, substituted: p.substituted })),
-  );
+  // 统一走 slicing 的规划：它负责挑倍率、算重采样尺寸、分配文件名
+  const plans = planSlices(slices, options.layers ?? [], {
+    scale: options.scale ?? DEFAULT_SCALE,
+    targetWidth: options.targetWidth,
+    format: options.format,
+    quality: options.quality,
+    namer,
+  });
 
-  return mapLimit(tasks, options.concurrency ?? 6, async ({ item, ex, substituted }) => {
-    // 文件名在下载前一次性分配，保证与 design_get_spec 里给出的名字一致且不互相覆盖
-    const file = namer(sanitizeFilename(item.name, "slice"), ex.format);
-    const path = join(outDir, file);
+  return mapLimit(plans, options.concurrency ?? 6, async (plan) => {
+    const path = join(outDir, plan.file);
     try {
-      const buf = await client.downloadImage(ex.downloadUrl);
+      const buf = await client.downloadImage(plan.downloadUrl);
       await writeFile(path, buf);
       return {
-        name: item.name,
-        path: file,
+        name: plan.name,
+        path: plan.file,
+        ref: plan.ref,
+        objectId: plan.objectId,
+        rect: plan.rect,
+        z: plan.z,
+        format: plan.format,
+        tier: plan.tier,
+        exportScale: plan.exportScale,
+        targetScale: plan.targetScale,
+        resampled: plan.resampled || undefined,
         // 实际落盘的倍率，可能与请求的倍率不同（该图层没导出这个倍率时）
-        scale: ex.scale,
-        substituted: substituted || undefined,
-        width: ex.width,
-        height: ex.height,
+        scale: plan.exportScale,
+        substituted: plan.substituted || undefined,
+        width: plan.width,
+        height: plan.height,
         bytes: buf.length,
         ok: true,
       };
     } catch (e) {
       return {
-        name: item.name,
-        path: file,
-        scale: ex.scale,
-        substituted: substituted || undefined,
-        width: ex.width,
-        height: ex.height,
+        name: plan.name,
+        path: plan.file,
+        ref: plan.ref,
+        objectId: plan.objectId,
+        rect: plan.rect,
+        z: plan.z,
+        format: plan.format,
+        tier: plan.tier,
+        exportScale: plan.exportScale,
+        targetScale: plan.targetScale,
+        resampled: plan.resampled || undefined,
+        scale: plan.exportScale,
+        substituted: plan.substituted || undefined,
+        width: plan.width,
+        height: plan.height,
         bytes: 0,
         ok: false,
         error: e instanceof Error ? e.message : String(e),

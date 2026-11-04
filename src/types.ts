@@ -159,6 +159,8 @@ export interface SliceExport {
 
 export interface SliceItem {
   id: string;
+  /** 该切图对应的图层 object_id，与 id 可能相同也可能不同 */
+  objectId?: string;
   name: string;
   rect: LayerRect;
   exports: SliceExport[];
@@ -168,6 +170,29 @@ export interface DownloadResult {
   name: string;
   /** 相对 outDir 的路径，便于调用方定位 */
   path: string;
+  /** 本次结果内的稳定短标识（s1、s2…），供调用方在对话里引用 */
+  ref?: string;
+  /** 对应图层的 object_id，与切图清单可对上 */
+  objectId?: string;
+  /** 设计稿坐标下的内容框 */
+  rect?: LayerRect;
+  /** 全局绘制顺序 */
+  z?: number;
+  /** 输出格式 */
+  format?: string;
+  /** 切图来源层级：slice=图层自带切图，composite=从合成图裁剪 */
+  tier?: "slice" | "composite";
+  /** 从合成图裁剪时不透明（会带上底层内容） */
+  opaque?: boolean;
+  /** 原始导出倍率 */
+  exportScale?: number;
+  /** 目标倍率；resampled 时即重采样后的实际倍率 */
+  targetScale?: number;
+  /** 图层没有目标倍率，已让服务端缩放对齐 */
+  resampled?: boolean;
+  /** 实际落盘尺寸 */
+  actualWidth?: number;
+  actualHeight?: number;
   /** 实际使用的导出倍率（默认 2x；该图层没有时会就近取） */
   scale?: number;
   /** 该图层没有请求的倍率，实际用了另一个倍率 */
@@ -200,7 +225,31 @@ export interface SpecResult {
   /** 设计稿宽度 -> 目标 CSS 宽度的缩放比 */
   scale: number;
   nodes: SpecNode[];
-  slices: { name: string; left: number; top: number; width: number; height: number; scale: number; file: string }[];
+  slices: {
+    name: string;
+    objectId: string;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+    /** 设计稿坐标下的原始像素宽高 */
+    designWidth?: number;
+    designHeight?: number;
+    scale: number;
+    /** 原始导出倍率 */
+    exportScale?: number;
+    targetScale?: number;
+    /** 已按目标倍率重采样 */
+    resampled?: boolean;
+    /** 本次结果内的稳定短标识 */
+    ref?: string;
+    z?: number;
+    /** 落盘像素尺寸 */
+    pixelWidth?: number;
+    pixelHeight?: number;
+    file: string;
+    style?: string[];
+  }[];
   notes: string[];
   /** 图层被截断时的说明 */
   truncated?: { total: number; returned: number };
