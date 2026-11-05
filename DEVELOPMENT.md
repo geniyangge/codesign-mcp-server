@@ -5,16 +5,18 @@
 ## 环境要求
 
 - Node.js ≥ 18.17
+- pnpm ≥ 11（`corepack enable` 或 `npm i -g pnpm`；`package.json` 的 `packageManager` 字段已锁版本）
 - TypeScript 5.7
 
 ## 常用命令
 
 ```bash
-npm run dev           # tsc --watch
-npm run build         # 产出 dist/
-npm test              # 校验版本号 + 编译测试 + node:test 跑单测
-npm run version:check # 校验 src/version.ts 与 package.json 是否一致
-npm run version:sync  # 把 src/version.ts 的版本号同步到 package.json
+pnpm install          # 安装依赖（会生成/复用 pnpm-lock.yaml）
+pnpm run dev          # tsc --watch
+pnpm run build        # 产出 dist/
+pnpm test             # 校验版本号 + 编译测试 + node:test 跑单测
+pnpm run version:check # 校验 src/version.ts 与 package.json 是否一致
+pnpm run version:sync  # 把 src/version.ts 的版本号同步到 package.json
 ```
 
 测试覆盖纯函数（链接解析、CDN 地址改写、文件名、并发池、规格生成）以及 client 的鉴权头、错误翻译与重试行为。
@@ -52,22 +54,22 @@ scripts/
 
 ## 发布新版本
 
-版本号只维护 **`src/version.ts`** 一处，`package.json` 与 `package-lock.json` 都是它的副本。
+版本号只维护 **`src/version.ts`** 一处，`package.json` 与 `pnpm-lock.yaml` 都是它的副本。
 
 一条命令完成发版（改版本 + 更新 CHANGELOG + 提交 + 打 tag）：
 
 ```bash
 # 先预览，不改动任何文件
-npm run release
+pnpm run release
 
 # 确认无误后执行
-npm run release -- --minor            # 新功能，1.1.0 → 1.2.0
-npm run release -- --patch            # 修 bug，1.2.0 → 1.2.1
-npm run release -- --major            # 破坏性变更，1.2.1 → 2.0.0
-npm run release -- --set 2.1.0        # 指定确切版本号
+pnpm run release -- --minor            # 新功能，1.1.0 → 1.2.0
+pnpm run release -- --patch            # 修 bug，1.2.0 → 1.2.1
+pnpm run release -- --major            # 破坏性变更，1.2.1 → 2.0.0
+pnpm run release -- --set 2.1.0        # 指定确切版本号
 
 # 发版后自动推送提交与 tag
-npm run release -- --minor --push
+pnpm run release -- --minor --push
 ```
 
 不传 `--patch/--minor/--major/--set` 时只做预览。版本类型也可由提交记录自动推断（`feat` → minor，`fix` → patch，`BREAKING CHANGE` → major）。

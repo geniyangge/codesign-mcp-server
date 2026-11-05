@@ -48,7 +48,7 @@ console.error(
     `    src/version.ts : ${version}`,
     `    package.json   : ${pkg.version}`,
     ``,
-    `请执行 npm run version:sync 同步，或手动修改 package.json。`,
+    `请执行 pnpm run version:sync 同步，或手动修改 package.json。`,
   ].join("\n"),
 );
 process.exit(1);

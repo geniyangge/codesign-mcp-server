@@ -6,3 +6,8 @@ codesign-assets/
 .DS_Store
 .env
 .omo/
+
+# 用 pnpm 管理依赖，别让 npm/yarn 的产物混进来
+package-lock.json
+yarn.lock
+.pnpm-store/

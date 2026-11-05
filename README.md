@@ -251,9 +251,11 @@ Cookie 对应的账号不在该设计稿所属团队。让设计同学把账号�
 ```bash
 git clone https://github.com/geniyangge/codesign-mcp-server.git
 cd codesign-mcp-server
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
+
+> 本项目用 [pnpm](https://pnpm.io/) 管理依赖。没装的话先 `npm i -g pnpm` 或 `corepack enable`。
 
 然后 `.mcp.json` 里改用绝对路径：
 

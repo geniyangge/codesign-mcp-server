@@ -2,18 +2,18 @@
 /**
  * 自动化发版脚本。
  *
- *   npm run release -- --dry-run          预览将要做的事（默认行为）
- *   npm run release -- --patch            发修订版 1.0.2 → 1.0.3
- *   npm run release -- --minor            发次版本 1.0.2 → 1.1.0
- *   npm run release -- --major            发主版本 1.0.2 → 2.0.0
- *   npm run release -- --set 1.2.3        指定确切版本号
- *   npm run release -- --minor --push     发布后立即推送
+ *   pnpm run release -- --dry-run         预览将要做的事（默认行为）
+ *   pnpm run release -- --patch           发修订版 1.0.2 → 1.0.3
+ *   pnpm run release -- --minor           发次版本 1.0.2 → 1.1.0
+ *   pnpm run release -- --major           发主版本 1.0.2 → 2.0.0
+ *   pnpm run release -- --set 1.2.3       指定确切版本号
+ *   pnpm run release -- --minor --push    发布后立即推送
  *
  * 流程：
  *   1. 检查工作区干净、在允许的分支上、与远端同步
  *   2. 跑测试
  *   3. 算出新版本号（默认按提交类型推断）
- *   4. 更新 src/version.ts、package.json、package-lock.json
+ *   4. 更新 src/version.ts、package.json
  *   5. 基于 git log 生成 CHANGELOG 条目
  *   6. commit + 创建附注 tag
  *   7. （--push 时）推送提交与 tag
@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const versionFile = join(root, "src", "version.ts");
 const pkgFile = join(root, "package.json");
+// pnpm 的锁文件不记录包自身版本，只有用 npm 克隆的人才有 package-lock.json 需要同步
 const lockFile = join(root, "package-lock.json");
 const changelogFile = join(root, "CHANGELOG.md");
 
@@ -106,12 +107,24 @@ function writeVersion(next) {
   pkg.version = next;
   writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + "\n", "utf8");
 
-  if (existsSync(lockFile)) {
-    const lock = JSON.parse(readFileSync(lockFile, "utf8"));
-    lock.version = next;
-    if (lock.packages?.[""]) lock.packages[""].version = next;
-    writeFileSync(lockFile, JSON.stringify(lock, null, 2) + "\n", "utf8");
-  }
+  syncLockfileVersion(next);
+}
+
+/**
+ * 把版本号同步进锁文件。
+ *
+ * `pnpm-lock.yaml`（lockfileVersion ≥ 6）**没有记录包自身的版本号**，
+ * 只有 lockfileVersion 和依赖的解析结果，所以 pnpm 这边无需改任何东西——
+ * 反过来说，之前若按「改 version 行」的思路去做，会误伤依赖的 version 字段。
+ *
+ * `package-lock.json` 是老格式（用 npm 克隆的人），存在时仍同步一下。
+ */
+function syncLockfileVersion(next) {
+  if (!existsSync(lockFile)) return;
+  const lock = JSON.parse(readFileSync(lockFile, "utf8"));
+  lock.version = next;
+  if (lock.packages?.[""]) lock.packages[""].version = next;
+  writeFileSync(lockFile, JSON.stringify(lock, null, 2) + "\n", "utf8");
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +161,7 @@ if (localAhead > 0 && !DRY_RUN) {
 const current = readVersion();
 const pkgVersion = JSON.parse(readFileSync(pkgFile, "utf8")).version;
 if (current !== pkgVersion) {
-  fail(`版本号不一致（src/version.ts=${current}，package.json=${pkgVersion}），请先 npm run version:sync。`);
+  fail(`版本号不一致（src/version.ts=${current}，package.json=${pkgVersion}），请先 pnpm run version:sync。`);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,12 +328,12 @@ if (DRY_RUN) {
 console.log();
 console.log(c.dim("运行测试…"));
 try {
-  // Windows 上 npm 是 .cmd，需要走 shell 才能执行；把整个命令拼成一个字符串，
+  // Windows 上 pnpm 是 .cmd，需要走 shell 才能执行；把整个命令拼成一个字符串，
   // 避免 execFileSync 在 shell 模式下把参数和命令拼接产生的 DEP0190 警告。
   if (process.platform === "win32") {
-    execFileSync(`npm run test`, { cwd: root, stdio: "pipe", shell: true });
+    execFileSync(`pnpm run test`, { cwd: root, stdio: "pipe", shell: true });
   } else {
-    execFileSync("npm", ["run", "test"], { cwd: root, stdio: "pipe" });
+    execFileSync("pnpm", ["run", "test"], { cwd: root, stdio: "pipe" });
   }
   step("测试通过");
 } catch (e) {
@@ -330,7 +343,7 @@ try {
 
 // 改版本号
 writeVersion(next);
-step(`版本号已更新：${current} → ${next}（version.ts / package.json / package-lock.json）`);
+step(`版本号已更新：${current} → ${next}（version.ts / package.json）`);
 
 // 写 CHANGELOG
 writeChangelog(section);
