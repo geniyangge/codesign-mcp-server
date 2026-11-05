@@ -1,4 +1,4 @@
-# codesign-mcp-server
+# codesign-mcp-server [![npm](https://img.shields.io/npm/v/codesign-mcp-server.svg)](https://www.npmjs.com/package/codesign-mcp-server) [![Download](https://img.shields.io/npm/dm/codesign-mcp-server)](https://www.npmjs.com/package/codesign-mcp-server) [![License](https://img.shields.io/npm/l/codesign-mcp-server)](https://www.npmjs.com/package/codesign-mcp-server) [![Node](https://img.shields.io/npm/node/v/codesign-mcp-server)](https://www.npmjs.com/package/codesign-mcp-server)
 
 腾讯 CoDesign 设计稿 MCP 服务。让 Claude Code、Cursor 等 AI 编程助手直接读取设计稿的图层标注、下载切图、生成还原规格，然后据此写代码。
 
