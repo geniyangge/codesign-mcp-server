@@ -210,3 +210,61 @@ test("pickExports 缺少目标倍率时就近取，并标记 substituted", () =>
 test("pickExports 空导出返回空数组", () => {
   assert.deepEqual(pickExports(mkSlice([])), []);
 });
+
+test("文本图层输出 typography 排版信息", () => {
+  const t: Layer = {
+    id: "t1",
+    objectId: "t1",
+    name: "说明",
+    type: "text",
+    rect: { x: 0, y: 0, width: 200, height: 60 },
+    visible: true,
+    text: {
+      fontName: "SimHei",
+      fontStyleName: "Regular",
+      size: 24,
+      leading: 36,
+      letterSpacing: 1,
+      textAlign: "center",
+      content: "第一行\n第二行",
+    },
+  };
+  const spec = buildSpec(screen, { name: "s", width: 750, height: 1612, layers: [t] }, []);
+  const ty = spec.nodes[0].typography!;
+  // 750 → 375 是一半
+  assert.equal(ty.fontSize, 12);
+  assert.equal(ty.lineHeight, 18);
+  assert.equal(ty.letterSpacing, 0.5);
+  assert.equal(ty.fontWeight, "400");
+  assert.equal(ty.textAlign, "center");
+  assert.deepEqual(ty.lines, ["第一行", "第二行"]);
+  assert.equal(ty.boxHeight, 30);
+});
+
+test("单行文本不输出 lines", () => {
+  const t: Layer = {
+    id: "t1",
+    objectId: "t1",
+    name: "标题",
+    type: "text",
+    rect: { x: 0, y: 0, width: 100, height: 20 },
+    visible: true,
+    text: { fontName: "SimHei", fontStyleName: "Bold", size: 22, content: "单行" },
+  };
+  const spec = buildSpec(screen, { name: "s", width: 750, height: 1612, layers: [t] }, []);
+  assert.equal(spec.nodes[0].typography!.lines, undefined);
+  assert.equal(spec.nodes[0].typography!.fontWeight, "700");
+});
+
+test("非文本图层不输出 typography", () => {
+  const s: Layer = {
+    id: "s1",
+    objectId: "s1",
+    name: "方块",
+    type: "shape",
+    rect: { x: 0, y: 0, width: 10, height: 10 },
+    visible: true,
+  };
+  const spec = buildSpec(screen, { name: "s", width: 750, height: 1612, layers: [s] }, []);
+  assert.equal(spec.nodes[0].typography, undefined);
+});
