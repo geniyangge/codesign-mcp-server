@@ -190,6 +190,38 @@ function num(v: any): number | undefined {
   return typeof n === "number" && Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * 文本排版细节。
+ *
+ * 用户反馈：spec 只给了盒子、font-size、color，行高与断行位置还得自己量。
+ * 这里把排版相关的值单列出来，并把原文按显式换行拆成行，
+ * 便于核对「这一行到底在哪里断」。
+ */
+function typographyOf(layer: Layer, scale: number) {
+  const t = layer.text;
+  if (!t) return undefined;
+  const lineHeight = t.leading ?? t.lineHeight;
+  const content = t.content ?? "";
+  // 只按显式换行拆，自动折行由浏览器决定，这里只提供盒子宽度作参考
+  const lines = content.includes("\n") ? content.split(/\r?\n/) : undefined;
+  return {
+    fontFamily: t.fontName || undefined,
+    fontSize: t.size ? Number((t.size * scale).toFixed(2)) : undefined,
+    fontWeight: t.fontStyleName ? mapFontWeight(t.fontStyleName) : undefined,
+    lineHeight: lineHeight ? Number((lineHeight * scale).toFixed(2)) : undefined,
+    letterSpacing:
+      t.letterSpacing !== undefined
+        ? Number((t.letterSpacing * scale).toFixed(2))
+        : (() => {
+            const ls = trackingToPx(t.tracking, t.size);
+            return ls !== undefined && ls !== 0 ? Number((ls * scale).toFixed(2)) : undefined;
+          })(),
+    textAlign: t.textAlign || undefined,
+    lines,
+    boxHeight: Number((layer.rect.height * scale).toFixed(2)),
+  };
+}
+
 function flatten(layers: Layer[], depth = 0, out: { layer: Layer; depth: number }[] = []) {
   for (const l of layers) {
     out.push({ layer: l, depth });
@@ -253,6 +285,7 @@ export function buildSpec(
     },
     style: [...flags(layer), ...styleFor(layer, scale)],
     text: layer.text?.content,
+    ...(layer.text ? { typography: typographyOf(layer, scale) } : {}),
   }));
 
   // 切图规划与下载共用同一份逻辑：只输出被选中的那一档，文件名也由它分配，

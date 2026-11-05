@@ -237,6 +237,22 @@ server.registerTool(
       scale: scaleSchema,
       cssScale: cssScaleSchema,
       targetWidth: z.number().positive().optional().describe("目标像素宽，优先于倍率。"),
+      regions: z
+        .array(
+          z.object({
+            name: z.string().optional().describe("输出文件名用的名字"),
+            objectId: z.string().optional().describe("关联的图层 objectId"),
+            x: z.number().describe("左边界，设计稿坐标"),
+            y: z.number().describe("上边界，设计稿坐标"),
+            width: z.number().positive().describe("宽度，设计稿像素"),
+            height: z.number().positive().describe("高度，设计稿像素"),
+          }),
+        )
+        .optional()
+        .describe(
+          "只裁这些区域（设计稿原始像素）。做像素级比对时不必自己裁整板图。" +
+            "design_get 的 unreconstructable[].suggestedRegion 可直接粘进来。",
+        ),
     },
   },
   async (args) => run(() => handleDownloadPreviews(args)),
@@ -642,7 +658,9 @@ async function handleDownloadPreviews(args: {
   screenId?: number;
   outDir?: string;
   scale?: number;
+  cssScale?: number;
   targetWidth?: number;
+  regions?: RegionRequest[];
 }) {
   const share = await loadShare(args.url, args.password);
   // 预览只需要画板详情，不必拉图层树和切图清单
@@ -655,6 +673,7 @@ async function handleDownloadPreviews(args: {
     concurrency: CONCURRENCY,
     scale: resolveScale(args),
     targetWidth: args.targetWidth,
+    regions: args.regions,
   });
   const failed = files.filter((f) => !f.ok).length;
   return jsonResult({ outDir, total: files.length - failed, failed, files });
