@@ -6,13 +6,11 @@ import type {
   SpecNode,
   SpecResult,
 } from "./types.js";
-import { planSlices, type ExportFormat } from "./slicing.js";
+import { planSlices, type ExportFormat, type ScaleSpec } from "./slicing.js";
 import { createNamer } from "./utils/filename.js";
 
 const DESIGN_WIDTH = 750;
 const CSS_WIDTH = 375;
-/** 切图规划默认倍率（spec 只描述切图位置，不影响坐标换算） */
-const DEFAULT_SPEC_SCALE = 2;
 
 /** tracking 是 Photoshop 千分之一单位，换算成 CSS letter-spacing */
 function trackingToPx(tracking: number | undefined, size: number): number | undefined {
@@ -206,8 +204,8 @@ export interface SpecOptions {
   maxLayers?: number;
   /** 最多下钻几层 */
   maxDepth?: number;
-  /** 切图目标倍率，默认 2；与下载接口传同样的值才能保证文件名一致 */
-  scale?: number;
+  /** 切图倍率语义，默认 native；与下载接口传同样的值才能保证文件名一致 */
+  scale?: ScaleSpec;
   /** 切图目标像素宽，优先于 scale */
   targetWidth?: number;
   /** 切图输出格式 */
@@ -261,7 +259,7 @@ export function buildSpec(
   // 否则会出现 spec 说 icon_2.png、实际落盘却叫 icon.png 的分叉
   const byObjectId = new Map(flat.map(({ layer }) => [layer.objectId, layer]));
   const sliceSpec = planSlices(slices, tree.layers, {
-    scale: opts.scale ?? DEFAULT_SPEC_SCALE,
+    scale: opts.scale ?? { kind: "native" },
     targetWidth: opts.targetWidth,
     format: opts.format,
     quality: opts.quality,

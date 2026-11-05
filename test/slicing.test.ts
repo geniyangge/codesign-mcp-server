@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { imageOps, pickExport, planSlices, sliceFileName } from "../src/slicing.js";
+import { imageOps, pickExport, planSlices, sliceFileName, toDesignScale } from "../src/slicing.js";
 import { createNamer } from "../src/utils/filename.js";
 import type { Layer, SliceItem } from "../src/types.js";
 
@@ -105,7 +105,7 @@ test("sliceFileName 带倍率后缀", () => {
 
 test("planSlices 只有 3x 导出时会重采样到目标倍率尺寸", () => {
   // 线上真实情况：设计稿只有 3x，请求 2 倍图
-  const entries = planSlices([slice()], [layer()], { scale: 2, namer: createNamer() });
+  const entries = planSlices([slice()], [layer()], { scale: { kind: "design", scale: 2 }, namer: createNamer() });
   assert.equal(entries.length, 1);
   const e = entries[0];
   assert.equal(e.exportScale, 3);
@@ -125,7 +125,7 @@ test("planSlices 精确倍率时不重采样、不加 thumbnail", () => {
   const twoX = slice({}, [
     { name: "图标", scale: 2, format: "png", width: 208, height: 82, downloadUrl: "https://cdn4.codesign.qq.com/a.png?imageMogr2/format/png", objectId: "49" },
   ]);
-  const e = planSlices([twoX], [layer()], { scale: 2, namer: createNamer() })[0];
+  const e = planSlices([twoX], [layer()], { scale: { kind: "design", scale: 2 }, namer: createNamer() })[0];
   assert.equal(e.resampled, false);
   assert.equal(e.substituted, false);
   assert.equal(e.width, 208);
@@ -134,7 +134,7 @@ test("planSlices 精确倍率时不重采样、不加 thumbnail", () => {
 
 test("planSlices 指定 format 时替换掉已有 format 而不是重复追加", () => {
   // 实测坑：format/png/format/webp 只认第一个，返回的仍是 PNG
-  const e = planSlices([slice()], [layer()], { scale: 2, format: "webp", namer: createNamer() })[0];
+  const e = planSlices([slice()], [layer()], { scale: { kind: "design", scale: 2 }, format: "webp", namer: createNamer() })[0];
   assert.equal((e.downloadUrl.match(/format\//g) || []).length, 1, "只能有一个 format: " + e.downloadUrl);
   assert.match(e.downloadUrl, /format\/webp/);
   assert.ok(!/format\/png/.test(e.downloadUrl), "旧的 format/png 必须被替换: " + e.downloadUrl);
@@ -145,7 +145,7 @@ test("planSlices svg 不做任何 imageMogr2 处理", () => {
   const svg = slice({}, [
     { name: "图标", scale: 2, format: "svg", width: 104, height: 41, downloadUrl: "https://cdn4.codesign.qq.com/a.svg", objectId: "49" },
   ]);
-  const e = planSlices([svg], [layer()], { scale: 2, namer: createNamer() })[0];
+  const e = planSlices([svg], [layer()], { scale: { kind: "design", scale: 2 }, namer: createNamer() })[0];
   assert.ok(!/imageMogr2|thumbnail/.test(e.downloadUrl), "svg 不应带操作链: " + e.downloadUrl);
 });
 
@@ -155,7 +155,7 @@ test("planSlices 用切图项 rect 而非组图层 rect 计算目标尺寸", () 
   const item = slice({ rect: { x: 0, y: 0, width: 388, height: 180 } }, [
     { name: "g", scale: 3, format: "png", width: 1164, height: 540, downloadUrl: "https://cdn4.codesign.qq.com/g.png?imageMogr2/format/png", objectId: "49" },
   ]);
-  const e = planSlices([item], [badGroup], { scale: 2, namer: createNamer() })[0];
+  const e = planSlices([item], [badGroup], { scale: { kind: "design", scale: 2 }, namer: createNamer() })[0];
   assert.equal(e.width, 776, "388 × 2");
   assert.deepEqual(e.rect, { x: 0, y: 0, width: 388, height: 180 });
 });
@@ -163,7 +163,7 @@ test("planSlices 用切图项 rect 而非组图层 rect 计算目标尺寸", () 
 test("planSlices 同名切图由命名器去重且与 manifest 一致", () => {
   const a = slice({ id: "1", name: "图标", exports: [{ name: "图标", scale: 2, format: "png", width: 208, height: 82, downloadUrl: "https://cdn4.codesign.qq.com/a.png?imageMogr2/format/png", objectId: "1" }] });
   const b = slice({ id: "2", name: "图标", exports: [{ name: "图标", scale: 2, format: "png", width: 208, height: 82, downloadUrl: "https://cdn4.codesign.qq.com/b.png?imageMogr2/format/png", objectId: "2" }] });
-  const entries = planSlices([a, b], [], { scale: 2, namer: createNamer() });
+  const entries = planSlices([a, b], [], { scale: { kind: "design", scale: 2 }, namer: createNamer() });
   assert.deepEqual(
     entries.map((e) => e.file),
     ["图标@2x.png", "图标@2x_2.png"],
@@ -175,12 +175,62 @@ test("planSlices 同名切图由命名器去重且与 manifest 一致", () => {
 });
 
 test("planSlices 保留图层 z 值供层叠排序", () => {
-  const e = planSlices([slice()], [layer({ z: 42 })], { scale: 2, namer: createNamer() })[0];
+  const e = planSlices([slice()], [layer({ z: 42 })], { scale: { kind: "design", scale: 2 }, namer: createNamer() })[0];
   assert.equal(e.z, 42);
 });
 
 test("planSlices targetWidth 优先于 scale", () => {
-  const e = planSlices([slice()], [layer()], { scale: 3, targetWidth: 150, namer: createNamer() })[0];
+  const e = planSlices([slice()], [layer()], { scale: { kind: "design", scale: 3 }, targetWidth: 150, namer: createNamer() })[0];
   assert.equal(e.width, 150);
   assert.match(e.downloadUrl, /thumbnail\/150x/);
+});
+
+// ---------------------------------------------------------------------------
+// 倍率语义：native 默认 + design / css 两种基准
+// ---------------------------------------------------------------------------
+
+test("native 取最高倍率的原图，不重采样", () => {
+  // 线上真实情况：图层有 1x/3x 两档，native 应该拿 3x 原图
+  const item = slice({}, [
+    { name: "a", scale: 1, format: "png", width: 104, height: 41, downloadUrl: "https://cdn4.codesign.qq.com/u1.png?imageMogr2/format/png", objectId: "49" },
+    { name: "a", scale: 3, format: "png", width: 312, height: 123, downloadUrl: "https://cdn4.codesign.qq.com/u3.png?imageMogr2/format/png", objectId: "49" },
+  ]);
+  const e = planSlices([item], [layer()], { scale: { kind: "native" }, namer: createNamer() })[0];
+  assert.equal(e.sourceScale, 3, "源图倍率如实返回");
+  assert.equal(e.resampled, false, "native 不做任何重采样");
+  assert.equal(e.width, 312, "落盘就是 3x 原图宽");
+  assert.ok(!/thumbnail/.test(e.downloadUrl), "不应带 thumbnail: " + e.downloadUrl);
+});
+
+test("不传 scale 等同于 native", () => {
+  const e = planSlices([slice()], [layer()], { namer: createNamer() })[0];
+  assert.equal(e.resampled, false);
+  assert.equal(e.width, 312, "3x 原图");
+});
+
+test("design 与 css 基准差一倍", () => {
+  // 设计稿宽 104 → design:2 = 208，css:2 = 104（因为 css 基准是 375 而非 750）
+  const twoX = slice({}, [
+    { name: "图标", scale: 3, format: "png", width: 312, height: 123, downloadUrl: "https://cdn4.codesign.qq.com/a.png?imageMogr2/format/png", objectId: "49" },
+  ]);
+  const design = planSlices([twoX], [layer()], { scale: { kind: "design", scale: 2 }, namer: createNamer() })[0];
+  const css = planSlices([twoX], [layer()], { scale: { kind: "css", scale: 2 }, namer: createNamer() })[0];
+  assert.equal(design.width, 208, "design:2 → 104 × 2");
+  assert.equal(css.width, 104, "css:2 → 104 × (375/750) × 2");
+});
+
+test("toDesignScale 换算正确", () => {
+  assert.equal(toDesignScale(undefined), undefined);
+  assert.equal(toDesignScale({ kind: "native" }), undefined);
+  assert.equal(toDesignScale({ kind: "design", scale: 2 }), 2);
+  // 设计稿 750 宽 = CSS 375 宽，所以 css 倍率要乘以 375/750 = 0.5
+  assert.equal(toDesignScale({ kind: "css", scale: 2 }), 1, "css 2x 的落盘宽正好等于设计稿宽");
+  assert.equal(toDesignScale({ kind: "css", scale: 4 }), 2, "css 4x 才等于设计稿 2x");
+});
+
+test("sourceScale 与 targetScale 分开记录", () => {
+  const e = planSlices([slice()], [layer()], { scale: { kind: "design", scale: 2 }, namer: createNamer() })[0];
+  assert.equal(e.sourceScale, 3, "源图是 3x");
+  assert.equal(e.targetScale, 2, "目标是 2x");
+  assert.equal(e.resampled, true);
 });

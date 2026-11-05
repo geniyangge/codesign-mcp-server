@@ -51,7 +51,7 @@ function sliceFor(objectId: string, over: Partial<SliceItem> = {}): SliceItem {
 }
 
 /** 命名器有状态（记录已分配的名字），每个用例都要新建一份 */
-const freshOpts = () => ({ namer: createNamer(), scale: 2 });
+const freshOpts = () => ({ namer: createNamer(), scale: { kind: "design", scale: 2 } as const });
 const base = freshOpts();
 
 test("有切图的图层走 slice 层级且不透明标记为 false", () => {
@@ -77,7 +77,7 @@ test("没有切图但有盒子的图层降级为从合成图裁剪", () => {
 
 test("composite 文件名带 _composite 以示区分", () => {
   // 每个用例用独立命名器，避免被前一个用例的分配记录影响
-  const [p] = planLayerExports(["12"], [layer()], [], screen, { namer: createNamer(), scale: 2 });
+  const [p] = planLayerExports(["12"], [layer()], [], screen, { namer: createNamer(), scale: { kind: "design", scale: 2 } });
   assert.equal(p.file, "图层 12_composite@2x.png");
 });
 
@@ -157,7 +157,7 @@ test("summarizeTiers 统计三个层级", () => {
 test("指定 targetWidth 时优先于 scale", () => {
   const [p] = planLayerExports(["12"], [layer()], [sliceFor("12")], screen, {
     namer: createNamer(),
-    scale: 3,
+    scale: { kind: "design", scale: 3 },
     targetWidth: 300,
   });
   assert.equal(p.width, 300);

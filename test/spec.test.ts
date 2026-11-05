@@ -142,7 +142,7 @@ test("buildSpec 每个图层只输出被选中的那一档倍率", () => {
       ],
     },
   ];
-  const spec = buildSpec(screen, tree([]), multi, { namer: createNamer(), scale: 2 });
+  const spec = buildSpec(screen, tree([]), multi, { namer: createNamer(), scale: { kind: "design", scale: 2 } });
   assert.equal(spec.slices.length, 1, "只应输出被选中的那一档");
   assert.equal(spec.slices[0].file, "多倍率@2x.png");
   assert.equal(spec.slices[0].exportScale, 2);
