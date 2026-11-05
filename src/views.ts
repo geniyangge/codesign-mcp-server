@@ -238,6 +238,8 @@ export function collectUnreconstructable(layers: Layer[], subtreeId?: string): {
   reason: string;
   /** 可用的兜底导出方式 */
   fallback: string;
+  /** 建议的导出区域，可直接粘进 design_export 的 regions */
+  suggestedRegion?: { objectId: string; x: number; y: number; width: number; height: number };
 }[] {
   const out: ReturnType<typeof collectUnreconstructable> = [];
   const scope = subtreeId ? findSubtree(layers, subtreeId) : layers;
@@ -253,7 +255,22 @@ export function collectUnreconstructable(layers: Layer[], subtreeId?: string): {
       rect: box,
       z: layer.z,
       reason: usable ? "位图图层，设计稿没有矢量信息也没有切图" : "位图图层，且盒子为空，无法定位",
-      fallback: usable ? "design_export(objectIds) 会从合成图裁剪（不透明）" : "需要设计同学补切图",
+      fallback: usable
+        ? "design_export(objectIds) 会从合成图裁剪（不透明）；或 design_export(regions) 用下面的 suggestedRegion"
+        : "盒子为空，只能请设计同学在 CoDesign 里补切图",
+      // 坐标准备好，调用方不用自己从 rect 换算——这块坐标必须是设计稿原始像素，
+      // 不是 CSS 缩放后的值，容易算错
+      ...(usable
+        ? {
+            suggestedRegion: {
+              objectId: layer.objectId,
+              x: Math.round(box.x),
+              y: Math.round(box.y),
+              width: Math.round(box.width),
+              height: Math.round(box.height),
+            },
+          }
+        : {}),
     });
   }
   return out;
@@ -269,4 +286,42 @@ export function assignRefs(layers: Layer[]): Layer[] {
       return copy;
     });
   return walk(layers);
+}
+
+/**
+ * 按图层名匹配批量取 objectId。
+ *
+ * 用户反馈：只能传 objectIds[]，多图层时要手工从 design_get 里逐个抄 id 再拼数组。
+ * 名字是中文且常带「拷贝 2」这类后缀，用正则比精确匹配实用。
+ * 非法正则直接抛出可读错误，而不是静默返回空列表。
+ */
+export function matchLayersByName(
+  layers: Layer[],
+  pattern: string,
+  opts: { types?: string[]; limit?: number } = {},
+): { objectId: string; name: string; type: string; z?: number; rect: LayerRect; hasSlice: boolean }[] {
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern, "i");
+  } catch (e) {
+    throw new Error(`namePattern 不是合法的正则表达式：${pattern}（${e instanceof Error ? e.message : String(e)}）`);
+  }
+
+  const out: ReturnType<typeof matchLayersByName> = [];
+  for (const { layer } of flattenWithMeta(layers)) {
+    if (!layer.visible) continue;
+    if (opts.types?.length && !opts.types.includes(layer.type)) continue;
+    if (!re.test(layer.name || "")) continue;
+    out.push({
+      objectId: layer.objectId,
+      name: layer.name || layer.type,
+      type: layer.type,
+      z: layer.z,
+      rect: rectOf(layer),
+      hasSlice: Boolean(layer.slice),
+    });
+  }
+  // z 越大越靠上，按绘制顺序返回更符合直觉
+  out.sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
+  return opts.limit && opts.limit > 0 ? out.slice(0, opts.limit) : out;
 }

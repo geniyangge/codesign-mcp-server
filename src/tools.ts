@@ -157,6 +157,10 @@ export interface DownloadOptions {
   format?: ExportFormat;
   /** jpg/webp 质量 */
   quality?: number;
+  /** 文件名转成纯 ASCII */
+  asciiNames?: boolean;
+  /** 文件名前缀 */
+  prefix?: string;
   concurrency?: number;
   /** 同一目录内共享命名器，跨画板/跨批次去重 */
   namer?: ReturnType<typeof createNamer>;
@@ -208,6 +212,8 @@ export async function downloadSlices(
     targetWidth: options.targetWidth,
     format: options.format,
     quality: options.quality,
+    asciiNames: options.asciiNames,
+    prefix: options.prefix,
     namer,
   });
 

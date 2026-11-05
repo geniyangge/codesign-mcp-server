@@ -1,5 +1,5 @@
 import type { Layer, LayerRect, SliceExport, SliceItem } from "./types.js";
-import { sanitizeFilename } from "./utils/filename.js";
+import { sanitizeFilename, toAsciiName, withPrefix } from "./utils/filename.js";
 
 /**
  * 切图规划：把「图层 + 切图清单」整理成一组可下载的条目。
@@ -124,6 +124,10 @@ export interface PlanOptions {
   /** 输出格式，默认沿用切图自带格式 */
   format?: ExportFormat;
   quality?: number;
+  /** 文件名转成纯 ASCII（中文名在 CI / URL 编码链路上是隐患） */
+  asciiNames?: boolean;
+  /** 文件名前缀，便于按来源分组 */
+  prefix?: string;
   /** 命名器，调用方注入才能在多次调用间保持一致 */
   namer: (base: string, ext: string) => string;
 }
@@ -185,7 +189,13 @@ export function planSlices(
     const ext = options.format ?? picked.export.format ?? "png";
     // native 时文件名倍率用源图自带的，避免「@3x 的文件里其实是原图」这种歧义
     const nameScale = designScale ?? picked.export.scale;
-    const file = options.namer(sanitizeFilename(sliceFileName(item.name || layer?.name || "slice", nameScale), "slice"), ext);
+    const file = options.namer(
+      sanitizeFilename(
+        buildFileName(item.name || layer?.name || "slice", nameScale, options, String(item.id ?? item.objectId)),
+        "slice",
+      ),
+      ext,
+    );
     const height =
       picked.export.width > 0
         ? Math.round((picked.export.height / picked.export.width) * wantWidth)
@@ -266,6 +276,21 @@ export function sliceFileName(name: string, scale: number): string {
   const clean = (name || "slice").trim() || "slice";
   const suffix = Number.isFinite(scale) && scale > 0 ? `@${formatScale(scale)}x` : "";
   return `${clean}${suffix}`;
+}
+
+/**
+ * 组合最终的基础名：可选 ASCII 化 + 可选前缀 + 倍率后缀。
+ * 倍率后缀始终用 ASCII（`@2x`），所以即使名字是中文也能被前端工具安全解析。
+ */
+export function buildFileName(
+  name: string,
+  scale: number,
+  opts: { asciiNames?: boolean; prefix?: string },
+  objectId?: string,
+): string {
+  const base = opts.asciiNames ? toAsciiName(name, objectId) : name;
+  const withPrefixName = withPrefix(base, opts.prefix);
+  return sliceFileName(withPrefixName, scale);
 }
 
 /** 2 → "2"；1.5 → "1.5"；2.333 → "2.33" */

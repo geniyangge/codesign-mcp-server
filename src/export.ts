@@ -50,6 +50,10 @@ export interface ExportOptions {
   targetWidth?: number;
   format?: ExportFormat;
   quality?: number;
+  /** 文件名转成纯 ASCII */
+  asciiNames?: boolean;
+  /** 文件名前缀 */
+  prefix?: string;
   /** 命名器，调用方注入才能跨调用保持一致 */
   namer: (base: string, ext: string) => string;
 }
