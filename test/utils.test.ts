@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { parseDesignId, parseScreenId, parseShareId, toCdnUrl } from "../src/client.js";
 import { CoDesignError } from "../src/errors.js";
 import { mapLimit } from "../src/utils/concurrency.js";
-import { createNamer, sanitizeFilename } from "../src/utils/filename.js";
+import { createNamer, sanitizeFilename, toAsciiName, withPrefix } from "../src/utils/filename.js";
 
 test("parseShareId 兼容各种分享链接写法", () => {
   assert.equal(parseShareId("https://codesign.qq.com/app/s/100000000000001"), 100000000000001);
@@ -127,4 +127,36 @@ test("mapLimit 按并发度执行且保持结果顺序", async () => {
 test("mapLimit 处理空数组与非法并发度", async () => {
   assert.deepEqual(await mapLimit([], 4, async (n: number) => n), []);
   assert.deepEqual(await mapLimit([1, 2], 0, async (n) => n), [1, 2]);
+});
+
+// ---------------------------------------------------------------------------
+// ASCII 文件名
+// ---------------------------------------------------------------------------
+
+test("toAsciiName 把常见中文词转成英文", () => {
+  assert.equal(toAsciiName("图标"), "icon");
+  assert.equal(toAsciiName("按钮_确定"), "btn");
+});
+
+test("toAsciiName 无匹配时用 objectId 兜底", () => {
+  assert.equal(toAsciiName("示例cp头像框", "290").startsWith("layer-") || toAsciiName("示例cp头像框", "290").length > 0, true);
+  const out = toAsciiName("纯中文名", "290");
+  assert.equal(out, "layer-290");
+});
+
+test("toAsciiName 结果只含安全字符", () => {
+  for (const name of ["图标/按钮", "a b:c*d", "图片_AB1-0303 (1)", "示例头像框效果图"]) {
+    const out = toAsciiName(name, "1");
+    assert.match(out, /^[a-z0-9-]+$/, `${name} → ${out}`);
+  }
+});
+
+test("toAsciiName 去掉全角标点与多余连字符", () => {
+  assert.equal(toAsciiName("图标，按钮。（确定）"), "icon-btn");
+});
+
+test("withPrefix 加前缀并 ASCII 化", () => {
+  assert.equal(withPrefix("icon@2x", "item"), "item-icon@2x");
+  assert.equal(withPrefix("icon", undefined), "icon");
+  assert.equal(withPrefix("icon", "项目"), "icon");
 });

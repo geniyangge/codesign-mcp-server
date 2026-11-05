@@ -16,7 +16,7 @@ import { attachSlices, NATIVE_SCALE, downloadSlices, downloadPreviews, resolveSc
 import type { Layer, ShareInfo } from "./types.js";
 import { mapLimit } from "./utils/concurrency.js";
 import { createNamer } from "./utils/filename.js";
-import { assignRefs, collectUnreconstructable, projectLayers, type LayerView } from "./views.js";
+import { assignRefs, collectUnreconstructable, matchLayersByName, projectLayers, type LayerView } from "./views.js";
 import { VERSION } from "./version.js";
 
 const COOKIE = process.env.CODESIGN_COOKIE || "";
@@ -197,9 +197,8 @@ server.registerTool(
       cssScale: cssScaleSchema,
       targetWidth: z
         .number()
-        .positive()
         .optional()
-        .describe("目标像素宽，优先于 scale。例如只想要 200px 宽的图就传 200。"),
+        .describe("目标像素宽，优先于倍率。例如只想要 200px 宽的图就传 200。"),
       format: z
         .enum(["png", "jpg", "webp"])
         .optional()
@@ -211,6 +210,11 @@ server.registerTool(
         .max(100)
         .optional()
         .describe("jpg/webp 质量（1-100），对 png 无效。"),
+      asciiNames: z
+        .boolean()
+        .optional()
+        .describe("文件名转成纯 ASCII（如 图标 → icon）。中文名在 CI / URL 编码链路上容易出问题。"),
+      prefix: z.string().min(1).optional().describe("文件名前缀，便于按来源分组，例如 \"item-\"。"),
     },
   },
   async (args) => run(() => handleDownloadSlices(args)),
@@ -266,6 +270,17 @@ server.registerTool(
         .array(z.string().min(1))
         .optional()
         .describe("要导出的图层 objectId 列表（design_get 返回的 objectId 字段）。"),
+      namePattern: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "按图层名正则匹配批量导出，省去手工抄 objectId。例如 \"图标|按钮\"、\"^图片_\"。与 objectIds 互斥。",
+        ),
+      nameTypes: z
+        .array(z.string())
+        .optional()
+        .describe('配合 namePattern 使用，限定图层类型，例如 ["shape"]。'),
       regions: z
         .array(
           z.object({
@@ -284,6 +299,15 @@ server.registerTool(
       targetWidth: z.number().positive().optional().describe("目标像素宽，优先于倍率。"),
       format: formatSchema,
       quality: qualitySchema,
+      asciiNames: z
+        .boolean()
+        .optional()
+        .describe("文件名转成纯 ASCII（如 图标 → icon）。中文名在 CI / URL 编码链路上容易出问题。"),
+      prefix: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("文件名前缀，便于按来源分组，例如 \"item-\"。"),
     },
   },
   async (args) => run(() => handleExport(args)),
@@ -507,6 +531,8 @@ async function handleDownloadSlices(args: {
   targetWidth?: number;
   format?: ExportFormat;
   quality?: number;
+  asciiNames?: boolean;
+  prefix?: string;
 }) {
   const scaleSpec = resolveScale(args);
   const share = await loadShare(args.url, args.password);
@@ -530,6 +556,8 @@ async function handleDownloadSlices(args: {
       targetWidth: args.targetWidth,
       format: args.format,
       quality: args.quality,
+      asciiNames: args.asciiNames,
+      prefix: args.prefix,
       concurrency: CONCURRENCY * 2,
       namer,
       layers: t.tree?.layers,
@@ -632,6 +660,32 @@ async function handleDownloadPreviews(args: {
   return jsonResult({ outDir, total: files.length - failed, failed, files });
 }
 
+/**
+ * 决定要导出哪些图层：显式 objectId 优先，否则按名字正则匹配。
+ * 正则一个都没匹配上时直接报错，而不是静默导出 0 个文件。
+ */
+function resolveObjectIds(
+  args: { objectIds?: string[]; namePattern?: string; nameTypes?: string[] },
+  layers: Layer[],
+): string[] {
+  if (args.objectIds?.length) return args.objectIds;
+  if (!args.namePattern) return [];
+  const matched = matchLayersByName(layers, args.namePattern, { types: args.nameTypes });
+  if (!matched.length) {
+    throw new CoDesignError(
+      `没有图层名匹配 ${args.namePattern}`,
+      undefined,
+      [
+        "namePattern 是正则表达式（不区分大小写），常见写法：",
+        '  "图标|按钮"      匹配含「图标」或「按钮」的图层',
+        '  "^图片_"         匹配以「图片_」开头',
+        "可以先用 design_get 看看实际图层名。",
+      ].join("\n"),
+    );
+  }
+  return matched.map((m) => m.objectId);
+}
+
 /** 按图层 / 区域导出，是「位图且没有切图」图层的兜底 */
 async function handleExport(args: {
   url: string;
@@ -640,25 +694,38 @@ async function handleExport(args: {
   screenName?: string;
   outDir?: string;
   objectIds?: string[];
+  namePattern?: string;
+  nameTypes?: string[];
   regions?: RegionRequest[];
   scale?: number;
   cssScale?: number;
   targetWidth?: number;
   format?: ExportFormat;
   quality?: number;
+  asciiNames?: boolean;
+  prefix?: string;
 }) {
-  const hasLayers = Boolean(args.objectIds?.length);
+  const hasPattern = Boolean(args.namePattern);
+  const hasLayers = Boolean(args.objectIds?.length) || hasPattern;
   const hasRegions = Boolean(args.regions?.length);
   if (!hasLayers && !hasRegions) {
     throw new CoDesignError("需要指定要导出的内容", undefined, [
-      "objectIds 与 regions 二选一：",
-      "  objectIds: [\"12\", \"46\"]   按图层导出（有切图拿切图，没有则裁合成图）",
-      "  regions: [{ x: 0, y: 0, width: 750, height: 1141 }]   按区域导出",
-      "图层 objectId 可用 design_get 拿到。",
+      "三种方式选一种：",
+      '  objectIds: ["12", "46"]        按图层 objectId 导出',
+      '  namePattern: "图标|按钮"        按图层名正则批量导出',
+      "  regions: [{ x, y, width, height }]  按区域导出（设计稿原始像素）",
+      "objectId 可用 design_get 拿到。",
     ].join("\n"));
   }
   if (hasLayers && hasRegions) {
-    throw new CoDesignError("objectIds 与 regions 不能同时传", undefined, "请分两次调用，或用其中一种方式。");
+    throw new CoDesignError("图层导出与区域导出不能同时传", undefined, "请分两次调用，或用其中一种方式。");
+  }
+  if (args.objectIds?.length && hasPattern) {
+    throw new CoDesignError(
+      "objectIds 与 namePattern 不能同时传",
+      undefined,
+      "二选一：已知 objectId 用 objectIds，只知道名字用 namePattern。",
+    );
   }
 
   const share = await loadShare(args.url, args.password);
@@ -681,11 +748,13 @@ async function handleExport(args: {
     await mkdir(dir, { recursive: true });
 
     const plans = hasLayers
-      ? planLayerExports(args.objectIds!, t.tree?.layers ?? [], t.slices ?? [], t.detail, {
+      ? planLayerExports(resolveObjectIds(args, t.tree?.layers ?? []), t.tree?.layers ?? [], t.slices ?? [], t.detail, {
           scale: scaleSpec,
           targetWidth: args.targetWidth,
           format: args.format,
           quality: args.quality,
+          asciiNames: args.asciiNames,
+          prefix: args.prefix,
           namer,
         })
       : planRegionExports(args.regions!, t.detail, {
@@ -693,6 +762,8 @@ async function handleExport(args: {
           targetWidth: args.targetWidth,
           format: args.format,
           quality: args.quality,
+          asciiNames: args.asciiNames,
+          prefix: args.prefix,
           namer,
         });
 

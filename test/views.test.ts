@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { assignRefs, collectUnreconstructable, flattenWithMeta, projectLayers } from "../src/views.js";
+import { assignRefs, collectUnreconstructable, flattenWithMeta, matchLayersByName, projectLayers } from "../src/views.js";
 import type { Layer } from "../src/types.js";
 
 function layer(over: Partial<Layer> = {}): Layer {
@@ -184,5 +184,79 @@ test("flattenWithMeta 带出父节点链", () => {
   assert.deepEqual(
     flat.map(({ layer, depth, parentId }) => `${layer.objectId}@${depth}<-${parentId}`),
     ["g1@0<-root", "t1@1<-g1", "g2@1<-g1", "s1@2<-g2"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 建议导出区域与名字匹配
+// ---------------------------------------------------------------------------
+
+test("collectUnreconstructable 给出 suggestedRegion 可直接用于 design_export", () => {
+  const [r] = collectUnreconstructable([
+    layer({ objectId: "b1", name: "位图", isBitmap: true, rect: { x: 12.6, y: 30.2, width: 99.4, height: 50.8 } }),
+  ]);
+  assert.deepEqual(r.suggestedRegion, { objectId: "b1", x: 13, y: 30, width: 99, height: 51 });
+  assert.match(r.fallback, /regions/);
+});
+
+test("盒子为空的图层不给 suggestedRegion", () => {
+  const [r] = collectUnreconstructable([
+    layer({ objectId: "z", isBitmap: true, rect: { x: 0, y: 0, width: 0, height: 0 } }),
+  ]);
+  assert.equal(r.suggestedRegion, undefined);
+  assert.match(r.fallback, /补切图/);
+});
+
+test("matchLayersByName 按正则批量匹配并按 z 排序", () => {
+  const layers = [
+    layer({ objectId: "a", name: "图标_关闭", z: 5 }),
+    layer({ objectId: "b", name: "按钮_确定", z: 2 }),
+    layer({ objectId: "c", name: "图标_打开", z: 9 }),
+  ];
+  const out = matchLayersByName(layers, "图标");
+  assert.deepEqual(
+    out.map((m) => m.objectId),
+    ["a", "c"],
+    "按 z 升序",
+  );
+});
+
+test("matchLayersByName 不区分大小写", () => {
+  const out = matchLayersByName([layer({ objectId: "a", name: "Icon_Home" })], "icon");
+  assert.equal(out.length, 1);
+});
+
+test("matchLayersByName 支持类型过滤", () => {
+  const layers = [
+    layer({ objectId: "a", name: "图标", type: "shape" }),
+    layer({ objectId: "b", name: "图标", type: "group" }),
+  ];
+  const out = matchLayersByName(layers, "图标", { types: ["group"] });
+  assert.deepEqual(
+    out.map((m) => m.objectId),
+    ["b"],
+  );
+});
+
+test("matchLayersByName 跳过隐藏图层", () => {
+  const out = matchLayersByName([layer({ objectId: "a", name: "图标", visible: false })], "图标");
+  assert.equal(out.length, 0);
+});
+
+test("matchLayersByName 非法正则抛出可读错误", () => {
+  assert.throws(() => matchLayersByName([], "["), /不是合法的正则表达式/);
+});
+
+test("matchLayersByName 标出图层是否有切图", () => {
+  const out = matchLayersByName(
+    [
+      layer({ objectId: "a", name: "图标", slice: { objectId: "a", scales: [2], formats: ["png"], exportWidth: 1, exportHeight: 1 } }),
+      layer({ objectId: "b", name: "图标2" }),
+    ],
+    "图标",
+  );
+  assert.deepEqual(
+    out.map((m) => m.hasSlice),
+    [true, false],
   );
 });
