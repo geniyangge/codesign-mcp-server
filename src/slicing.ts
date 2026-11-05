@@ -76,6 +76,8 @@ export interface SlicePlanEntry {
   format: string;
   /** 原始导出倍率（composite 时等于 targetScale） */
   exportScale: number;
+  /** 源图自带倍率，用于判断清晰度上限 */
+  sourceScale: number;
   /** 期望的倍率；resampled 时即重采样后的实际倍率 */
   targetScale: number;
   /** 图层没有目标倍率，已让服务端缩放对齐 */
@@ -93,9 +95,30 @@ export interface SlicePlanEntry {
   downloadUrl: string;
 }
 
+/**
+ * 倍率语义。
+ *
+ * 这里有个容易踩的坑：CoDesign 设计稿宽 750，对应 CSS 375。
+ * - `native`    取图层自带的原始导出，**不做任何重采样**，画质零损失（默认）
+ * - `design`    相对设计稿 750 的倍率。`design: 2` → 落盘 1500px，对 CSS 是 4x
+ * - `css`       相对 CSS 375 的倍率。`css: 2` → 落盘 750px，与前端说的「2 倍图」一致
+ * - `targetWidth` 直接指定像素宽，优先级最高
+ *
+ * 默认选 native 而不是固定 2：源图是 3x 时，默认降到 2x 属于静默掉画质，
+ * 该由调用方主动选择，而不是默认行为。
+ */
+export type ScaleSpec =
+  | { kind: "native" }
+  | { kind: "design"; scale: number }
+  | { kind: "css"; scale: number };
+
+/** 设计稿宽与 CSS 宽的换算基准 */
+const DESIGN_BASE = 750;
+const CSS_BASE = 375;
+
 export interface PlanOptions {
-  /** 目标倍率，默认 2 */
-  scale?: number;
+  /** 倍率语义，默认 native（取原图不重采样） */
+  scale?: ScaleSpec;
   /** 目标像素宽，优先于 scale */
   targetWidth?: number;
   /** 输出格式，默认沿用切图自带格式 */
@@ -106,12 +129,24 @@ export interface PlanOptions {
 }
 
 /**
+ * 把倍率语义换算成「相对设计稿 px 的倍率」。
+ * native 返回 undefined，表示不加任何缩放。
+ */
+export function toDesignScale(spec: ScaleSpec | undefined): number | undefined {
+  if (!spec || spec.kind === "native") return undefined;
+  if (spec.kind === "design") return spec.scale > 0 ? spec.scale : undefined;
+  // css 倍率换算到设计稿基准：设计稿 750 宽 = CSS 375 宽，
+  // 所以 css:2 相当于设计稿 2 × (375/750) = 1 倍，落盘宽正好等于设计稿宽
+  const ratio = DESIGN_BASE > 0 ? CSS_BASE / DESIGN_BASE : 0.5;
+  return spec.scale > 0 ? spec.scale * ratio : undefined;
+}
+
+/**
  * 为每个切图项挑一档导出并规划下载。
  *
- * 倍率优先级：显式 scale > 内置默认 2x。
- * 该图层没有目标倍率时，按既有规则就近取一档，再让服务端重采样到目标尺寸——
- * 这样调用方拿到的图**原始倍率不符但像素尺寸符合预期**，不会出现
- * 「要 2 倍图却拿到 3 倍图、文件体积翻倍」的意外。
+ * 默认取图层自带的原始导出，**不重采样**——调用方拿到的就是设计稿里那张图。
+ * 只有显式指定 design/css 倍率或 targetWidth 时才会让服务端缩放，
+ * 并在返回体里用 sourceScale / targetScale / resampled 如实说明。
  */
 export function planSlices(
   slices: SliceItem[],
@@ -119,23 +154,24 @@ export function planSlices(
   options: PlanOptions,
 ): SlicePlanEntry[] {
   const byId = indexLayers(layers);
-  const targetScale = options.scale ?? 2;
+  const designScale = toDesignScale(options.scale);
   const entries: SlicePlanEntry[] = [];
 
   for (const item of slices) {
     if (!item.exports.length) continue;
     const layer = byId.get(String(item.id)) ?? byId.get(String(item.objectId));
     const rect = pickRect(item, layer);
-    const picked = pickExport(item, targetScale);
+    // native 时挑最高倍率那档（原图），否则按目标倍率就近取
+    const picked = pickExport(item, designScale);
     if (!picked) continue;
 
     const format = options.format ?? (picked.export.format as ExportFormat) ?? "png";
-    // 目标像素宽：显式 targetWidth 优先，否则按设计稿宽度 × 目标倍率
+    // 目标像素宽：显式 targetWidth > 设计稿宽 × 倍率 > 原图宽（native）
     const wantWidth =
       options.targetWidth && options.targetWidth > 0
         ? Math.round(options.targetWidth)
-        : rect.width > 0
-          ? Math.round(rect.width * targetScale)
+        : designScale !== undefined && rect.width > 0
+          ? Math.round(rect.width * designScale)
           : Math.round(picked.export.width);
     // 实际导出宽与期望不一致就交给服务端缩放，调用方拿到的永远是对齐后的尺寸
     const needResize = Math.round(picked.export.width) !== wantWidth && wantWidth > 0;
@@ -147,7 +183,9 @@ export function planSlices(
       quality: options.quality,
     });
     const ext = options.format ?? picked.export.format ?? "png";
-    const file = options.namer(sanitizeFilename(sliceFileName(item.name || layer?.name || "slice", targetScale), "slice"), ext);
+    // native 时文件名倍率用源图自带的，避免「@3x 的文件里其实是原图」这种歧义
+    const nameScale = designScale ?? picked.export.scale;
+    const file = options.namer(sanitizeFilename(sliceFileName(item.name || layer?.name || "slice", nameScale), "slice"), ext);
     const height =
       picked.export.width > 0
         ? Math.round((picked.export.height / picked.export.width) * wantWidth)
@@ -161,8 +199,10 @@ export function planSlices(
       rect,
       z: layer?.z,
       format: ext,
+      /** 源图自带的倍率，调用方可据此判断清晰度上限 */
+      sourceScale: picked.export.scale,
       exportScale: picked.export.scale,
-      targetScale,
+      targetScale: designScale ?? picked.export.scale,
       resampled: needResize,
       substituted: picked.substituted,
       targetWidth: wantWidth,
@@ -183,11 +223,18 @@ interface PickedExport {
 }
 
 /**
- * 每张切图只取一个倍率，避免同一图层下载多份。
- * 若没有正好这个倍率：就近取**不超过**目标的最高档，再退而取最低档。
+ * 每个图层只取一档导出。
+ * - 指定目标倍率时：精确命中优先，否则就近取**不超过**目标的最高档
+ * - native（目标倍率 undefined）时：直接取**最高倍率**那档，也就是原图
  */
-export function pickExport(item: SliceItem, target: number): PickedExport | undefined {
+export function pickExport(item: SliceItem, target?: number): PickedExport | undefined {
   if (!item.exports.length) return undefined;
+
+  if (target === undefined) {
+    // 取倍率最高的一档；同倍率取第一个
+    const top = item.exports.reduce((a, b) => (b.scale > a.scale ? b : a));
+    return { export: top, substituted: false };
+  }
 
   const exact = item.exports.filter((e) => e.scale === target);
   if (exact.length) return { export: exact[0], substituted: false };

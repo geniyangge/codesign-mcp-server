@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import type { CoDesignClient } from "./client.js";
 import { CoDesignError } from "./errors.js";
-import { planSlices, imageOps, appendImageOps, type ExportFormat } from "./slicing.js";
+import { planSlices, imageOps, appendImageOps, toDesignScale, type ExportFormat, type ScaleSpec } from "./slicing.js";
 import type {
   DownloadResult,
   Layer,
@@ -93,11 +93,19 @@ export async function resolveScreens(
   });
 }
 
-/** 默认导出倍率，可用环境变量 CODESIGN_SCALE 覆盖 */
+/**
+ * 旧版默认倍率，仅供 `pickExports` 保持向后兼容。
+ *
+ * 新版工具默认走 `native`（取原图不重采样），不再默认降到 2x——
+ * 源图是 3x 时默认降采样属于静默掉画质，该由调用方主动选择。
+ */
 export const DEFAULT_SCALE = (() => {
   const n = Number(process.env.CODESIGN_SCALE);
   return Number.isFinite(n) && n > 0 ? n : 2;
 })();
+
+/** 工具的默认倍率语义：取原图，不做任何重采样 */
+export const NATIVE_SCALE: ScaleSpec = { kind: "native" };
 
 /** 每张切图最终选中的导出项，附带是否发生过倍率降级 */
 export interface PickedExport {
@@ -141,7 +149,8 @@ export function pickExports(item: SliceItem, scale?: number): PickedExport[] {
 }
 
 export interface DownloadOptions {
-  scale?: number;
+  /** 倍率语义，默认 native（取原图不重采样） */
+  scale?: ScaleSpec;
   /** 目标像素宽，优先于 scale */
   targetWidth?: number;
   /** 输出格式 */
@@ -195,7 +204,7 @@ export async function downloadSlices(
 
   // 统一走 slicing 的规划：它负责挑倍率、算重采样尺寸、分配文件名
   const plans = planSlices(slices, options.layers ?? [], {
-    scale: options.scale ?? DEFAULT_SCALE,
+    scale: options.scale ?? NATIVE_SCALE,
     targetWidth: options.targetWidth,
     format: options.format,
     quality: options.quality,
@@ -216,6 +225,7 @@ export async function downloadSlices(
         z: plan.z,
         format: plan.format,
         tier: plan.tier,
+        sourceScale: plan.sourceScale,
         exportScale: plan.exportScale,
         targetScale: plan.targetScale,
         resampled: plan.resampled || undefined,
@@ -237,6 +247,7 @@ export async function downloadSlices(
         z: plan.z,
         format: plan.format,
         tier: plan.tier,
+        sourceScale: plan.sourceScale,
         exportScale: plan.exportScale,
         targetScale: plan.targetScale,
         resampled: plan.resampled || undefined,
@@ -259,21 +270,22 @@ export async function downloadPreviews(
   options: {
     concurrency?: number;
     namer?: ReturnType<typeof createNamer>;
-    /** 目标倍率，1 表示原图；>1 由服务端放大 */
-    scale?: number;
+    /** 倍率语义，默认 native（原图）；design 倍率放大时由服务端处理 */
+    scale?: ScaleSpec;
     /** 目标像素宽，优先于 scale */
     targetWidth?: number;
   } = {},
 ): Promise<DownloadResult[]> {
   await mkdir(outDir, { recursive: true });
   const namer = options.namer ?? createNamer();
+  const designScale = toDesignScale(options.scale);
 
   return mapLimit(targets, options.concurrency ?? 6, async (t) => {
     const wantWidth =
       options.targetWidth && options.targetWidth > 0
         ? Math.round(options.targetWidth)
-        : options.scale && options.scale > 0
-          ? Math.round(t.detail.width * options.scale)
+        : designScale !== undefined
+          ? Math.round(t.detail.width * designScale)
           : undefined;
     const ops = wantWidth ? imageOps({ targetWidth: wantWidth }) : [];
     const file = namer(
