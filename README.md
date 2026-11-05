@@ -111,20 +111,36 @@ AI 会自动走完：看预览图 → 读图层标注 → 下切图 → 生成 C
 
 清单以 `ref`（`s1`、`s2`…）和 `objectId` 为主键，中文图层名和文件名只是附带信息，适合批量核对。
 
-**倍率一定按预期对齐**：设计稿只有 3 倍图、你要 2 倍图时，会由服务端重采样到 2 倍尺寸（`resampled: true`），不会给你一张 3 倍的大图。
+**默认取原图，不缩水**：不传倍率参数时，拿到的是图层自带的原图（源图 3 倍就是 3 倍），画质零损失。
+
+需要倍率时有两个参数，**基准不同、别混用**：
+
+| 参数 | 基准 | 例 | 落盘宽度 |
+|---|---|---|---|
+| `cssScale` | CSS 宽（375） | `cssScale: 2` | 750px —— 前端常说的「2 倍图」 |
+| `scale` | 设计稿宽（750） | `scale: 2` | 1500px —— 对 CSS 其实是 4x |
+| `targetWidth` | 直接指定像素宽 | `targetWidth: 500` | 500px |
+
+设计稿没有该倍率时会由服务端重采样（`resampled: true`），落盘尺寸始终等于目标尺寸；源图倍率记在 `sourceScale`。
 
 ```json
-{ "scale": 2, "format": "webp", "quality": 80 }
+{ "cssScale": 2, "format": "webp", "quality": 80, "asciiNames": true, "prefix": "item" }
 ```
 
-`targetWidth` 可以脱离倍率，直接指定像素宽。
+**文件名可以 ASCII 化**：`asciiNames: true` 会把中文名转成 `icon`、`img-xb4-0202` 这类安全名字（无匹配时用 `layer-<objectId>` 兜底），中文原名仍保留在清单里。`prefix` 再加一层分组前缀。
 
 ### 导出没有切图的图层
 
-设计稿里常见的「位图且没标切图」，`design_get` 会列在 `unreconstructable` 里。这时用 `design_export`：
+设计稿里常见的「位图且没标切图」，`design_get` 会列在 `unreconstructable` 里，**每条都附 `suggestedRegion`**，可直接粘进 `regions` 或 `objectIds`：
 
 ```json
-{ "objectIds": ["12", "46"], "scale": 2 }
+{ "objectIds": ["12", "46"] }
+```
+
+只知道名字、不想逐个抄 objectId 时用正则：
+
+```json
+{ "namePattern": "图标|按钮", "nameTypes": ["shape"] }
 ```
 
 导出分三级，返回体的 `tier` 会标出来：
@@ -135,13 +151,15 @@ AI 会自动走完：看预览图 → 读图层标注 → 下切图 → 生成 C
 | `composite` | 没有切图，从画板合成图裁剪 | **不透明**，会带上被遮挡的底层内容 |
 | `fail` | 没有切图且盒子为空 | — |
 
-> `composite` 的结果不能当透明素材用。要透明图，只能请设计同学在 CoDesign 里补切图。
+> **`composite` 无法做到透明。** CoDesign 不给图层级的原始资源——实测 42 个位图图层的 `exportables` 全为空、`pixels` 只是布尔标记、没有任何图片 URL，也没有渲染接口。要干净的透明图，只能请设计同学在 CoDesign 里把图层标记为切图导出。
 
 按区域导出把 `objectIds` 换成 `regions` 即可，坐标为**设计稿原始像素**（不是 CSS 缩放后的值）：
 
 ```json
 { "regions": [{ "name": "顶部横幅", "x": 0, "y": 0, "width": 750, "height": 1141 }] }
 ```
+
+做像素级比对时，`design_download_previews` 也支持 `regions`，不必自己裁整板图。
 
 ### 支持的链接
 
@@ -209,9 +227,14 @@ Cookie 对应的账号不在该设计稿所属团队。让设计同学把账号�
 - 用 `types: ["text"]` 只看某类图层，用 `subtreeId` 深入某个组
 - 用 `offset` / `limit` 分页，或 `fields: ["rect","name","type"]` 做字段投影
 
-**切图不是 2 倍图**
+**切图不是 2 倍图 / 尺寸和预期对不上**
 
-设计稿没有该倍率时，会由服务端重采样到目标尺寸，落盘像素尺寸恒等于「设计稿宽 × 目标倍率」，结果里 `resampled: true`。
+先确认你要的「2 倍」是哪种：
+
+- 前端说的「2 倍图」通常指 `cssScale: 2`，落盘 750px（375 × 2）
+- `scale: 2` 是相对设计稿 750，落盘 1500px，对 CSS 其实是 4x
+
+不传倍率则取原图，尺寸就是设计稿里那张图的大小。设计稿没有该倍率时由服务端重采样，结果里 `resampled: true`，源图倍率看 `sourceScale`。
 
 **Windows 终端中文乱码**
 
