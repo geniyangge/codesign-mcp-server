@@ -220,6 +220,19 @@ export interface SpecNode {
   };
   style: string[];
   text?: string;
+  /** 文本排版信息，便于直接落地（行高、对齐、断行位置） */
+  typography?: {
+    fontFamily?: string;
+    fontSize?: number;
+    fontWeight?: string;
+    lineHeight?: number;
+    letterSpacing?: number;
+    textAlign?: string;
+    /** 原始内容里的显式换行按行拆开，便于核对断行位置 */
+    lines?: string[];
+    /** 图层盒子高度与「行数 × 行高」的差值，用于判断垂直居中方式 */
+    boxHeight?: number;
+  };
 }
 
 export interface SpecResult {

@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { CoDesignClient } from "./client.js";
 import { CoDesignError } from "./errors.js";
+import type { RegionRequest } from "./export.js";
 import { planSlices, imageOps, appendImageOps, toDesignScale, type ExportFormat, type ScaleSpec } from "./slicing.js";
 import type {
   DownloadResult,
@@ -280,44 +281,66 @@ export async function downloadPreviews(
     scale?: ScaleSpec;
     /** 目标像素宽，优先于 scale */
     targetWidth?: number;
+    /**
+     * 只裁剪这些区域（设计稿坐标）。
+     * 做像素级比对时不必自己裁整板图，服务端直接给对应区域。
+     */
+    regions?: RegionRequest[];
   } = {},
 ): Promise<DownloadResult[]> {
   await mkdir(outDir, { recursive: true });
   const namer = options.namer ?? createNamer();
   const designScale = toDesignScale(options.scale);
 
-  return mapLimit(targets, options.concurrency ?? 6, async (t) => {
+  // 指定了 regions 就每块区域单独出一张，否则每个画板出一张整板图
+  const regions = options.regions?.length ? options.regions : undefined;
+  const tasks = regions
+    ? targets.flatMap((t) => regions.map((r) => ({ t, r })))
+    : targets.map((t) => ({ t, r: undefined as RegionRequest | undefined }));
+
+  return mapLimit(tasks, options.concurrency ?? 6, async ({ t, r }) => {
+    const src = t.detail.originalUrl ?? t.detail.previewUrl;
+    const rect = r ?? { x: 0, y: 0, width: t.detail.width, height: t.detail.height };
+    const label = r ? r.name || r.objectId || "region" : "preview";
     const wantWidth =
       options.targetWidth && options.targetWidth > 0
         ? Math.round(options.targetWidth)
         : designScale !== undefined
-          ? Math.round(t.detail.width * designScale)
+          ? Math.round(rect.width * designScale)
           : undefined;
-    const ops = wantWidth ? imageOps({ targetWidth: wantWidth }) : [];
+    const ops = imageOps({
+      crop: r ? { x: r.x, y: r.y, width: r.width, height: r.height } : undefined,
+      targetWidth: wantWidth,
+    });
+    const suffix = wantWidth ? `@${Math.round(wantWidth / (rect.width || 1))}x` : "";
     const file = namer(
-      sanitizeFilename(`${t.detail.name}_preview${wantWidth ? `@${Math.round(wantWidth / (t.detail.width || 1))}x` : ""}`, "screen"),
+      sanitizeFilename(r ? `${t.detail.name}_${label}_preview${suffix}` : `${t.detail.name}_preview${suffix}`, "screen"),
       "png",
     );
-    if (!t.detail.originalUrl && !t.detail.previewUrl) {
+    const width = wantWidth ?? Math.round(rect.width);
+    const height = wantWidth ? Math.round((rect.height / (rect.width || 1)) * wantWidth) : Math.round(rect.height);
+
+    if (!src) {
       return {
-        name: t.detail.name,
+        name: r ? label : t.detail.name,
         path: file,
-        width: t.detail.width,
-        height: t.detail.height,
+        objectId: r?.objectId,
+        rect,
+        width,
+        height,
         bytes: 0,
         ok: false,
         error: "该画板没有预览图",
       };
     }
-    const url = appendImageOps(t.detail.originalUrl ?? t.detail.previewUrl!, ops);
-    const width = wantWidth ?? t.detail.width;
-    const height = wantWidth ? Math.round((t.detail.height / (t.detail.width || 1)) * wantWidth) : t.detail.height;
     try {
-      const buf = await client.downloadImage(url);
+      const buf = await client.downloadImage(appendImageOps(src, ops));
       await writeFile(join(outDir, file), buf);
       return {
-        name: t.detail.name,
+        name: r ? label : t.detail.name,
         path: file,
+        objectId: r?.objectId,
+        rect,
         width,
         height,
         bytes: buf.length,
@@ -325,8 +348,10 @@ export async function downloadPreviews(
       };
     } catch (e) {
       return {
-        name: t.detail.name,
+        name: r ? label : t.detail.name,
         path: file,
+        objectId: r?.objectId,
+        rect,
         width,
         height,
         bytes: 0,
