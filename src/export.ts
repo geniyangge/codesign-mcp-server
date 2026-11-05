@@ -1,5 +1,5 @@
 import type { Layer, LayerRect, ScreenDetail, SliceItem } from "./types.js";
-import { appendImageOps, imageOps, indexLayers, pickExport, sliceFileName, type ExportFormat } from "./slicing.js";
+import { appendImageOps, imageOps, indexLayers, pickExport, sliceFileName, toDesignScale, type ExportFormat, type ScaleSpec } from "./slicing.js";
 import { sanitizeFilename } from "./utils/filename.js";
 
 /**
@@ -26,7 +26,9 @@ export interface ExportPlan {
   rect: LayerRect;
   z?: number;
   format: string;
-  /** 原始导出倍率；composite 时等于 targetScale */
+  /** 源图自带倍率：slice 是切图的导出倍率，composite 是画板自身（记 1） */
+  sourceScale: number;
+  /** 实际选中的导出倍率；composite 时等于 targetScale */
   exportScale: number;
   targetScale: number;
   resampled: boolean;
@@ -42,8 +44,8 @@ export interface ExportPlan {
 }
 
 export interface ExportOptions {
-  /** 目标倍率，默认 2 */
-  scale?: number;
+  /** 倍率语义，默认 native（取原图不重采样） */
+  scale?: ScaleSpec;
   /** 目标像素宽，优先于 scale */
   targetWidth?: number;
   format?: ExportFormat;
@@ -92,7 +94,7 @@ export function planLayerExports(
       continue;
     }
     const item = sliceById.get(String(id));
-    const picked = item ? pickExport(item, options.scale ?? 2) : undefined;
+    const picked = item ? pickExport(item, toDesignScale(options.scale)) : undefined;
 
     if (item && picked) {
       plans.push(slicePlan(item, layer, picked, options));
@@ -132,12 +134,12 @@ function slicePlan(
   options: ExportOptions,
 ): ExportPlan {
   const rect = boxOf(layer, item.rect);
-  const targetScale = options.scale ?? 2;
+  const designScale = toDesignScale(options.scale);
   const wantWidth =
     options.targetWidth && options.targetWidth > 0
       ? Math.round(options.targetWidth)
-      : rect.width > 0
-        ? Math.round(rect.width * targetScale)
+      : designScale !== undefined && rect.width > 0
+        ? Math.round(rect.width * designScale)
         : Math.round(picked.export.width);
   const needResize = wantWidth > 0 && Math.round(picked.export.width) !== wantWidth;
   const ext = options.format ?? picked.export.format ?? "png";
@@ -151,6 +153,7 @@ function slicePlan(
     picked.export.width > 0
       ? Math.round((picked.export.height / picked.export.width) * wantWidth)
       : Math.round(picked.export.height);
+  const nameScale = designScale ?? picked.export.scale;
 
   return {
     ref: "",
@@ -160,14 +163,15 @@ function slicePlan(
     rect,
     z: layer.z,
     format: ext,
+    sourceScale: picked.export.scale,
     exportScale: picked.export.scale,
-    targetScale,
+    targetScale: nameScale,
     resampled: needResize,
     opaque: false,
     width: wantWidth,
     height,
     file: options.namer(
-      sanitizeFilename(sliceFileName(item.name || layer.name || "slice", targetScale), "slice"),
+      sanitizeFilename(sliceFileName(item.name || layer.name || "slice", nameScale), "slice"),
       ext,
     ),
     downloadUrl: appendImageOps(picked.export.downloadUrl, ops),
@@ -187,8 +191,10 @@ function compositePlan(
   options: ExportOptions,
 ): ExportPlan {
   const ext = options.format ?? "png";
-  const targetScale = options.scale ?? 2;
-  const base = { ref: "", objectId, name, tier: "composite" as const, rect, z, format: ext, exportScale: targetScale, targetScale, opaque: true };
+  const designScale = toDesignScale(options.scale);
+  // 没有切图时只能裁合成图，源就是画板自身的分辨率，所以 sourceScale 记 1
+  const targetScale = designScale ?? 1;
+  const base = { ref: "", objectId, name, tier: "composite" as const, rect, z, format: ext, sourceScale: 1, exportScale: targetScale, targetScale, opaque: true };
 
   if (!screen.originalUrl) {
     return { ...base, resampled: false, width: 0, height: 0, file: "", downloadUrl: "", tier: "fail", reason: "该画板没有可裁剪的原图" };
@@ -202,15 +208,17 @@ function compositePlan(
       file: "",
       downloadUrl: "",
       tier: "fail",
-      reason: "图层盒子为空（0x0），既没有切图也没有可裁剪区域——需要设计同学补切图",
+      reason: "图层盒子为空（0x0），既没有切图也没有可裁剪区域——需要设计同学在 CoDesign 里补切图",
     };
   }
 
-  // 裁剪按设计稿坐标，缩放按目标倍率
+  // 裁剪按设计稿坐标；native 时保持原尺寸，指定倍率才缩放
   const wantWidth =
     options.targetWidth && options.targetWidth > 0
       ? Math.round(options.targetWidth)
-      : Math.round(rect.width * targetScale);
+      : designScale !== undefined
+        ? Math.round(rect.width * designScale)
+        : Math.round(rect.width);
   const ops = imageOps({
     crop: rect,
     targetWidth: Math.round(rect.width) !== wantWidth ? wantWidth : undefined,
@@ -233,6 +241,7 @@ function compositePlan(
 }
 
 function emptyPlan(objectId: string, name: string, options: ExportOptions): ExportPlan {
+  const designScale = toDesignScale(options.scale) ?? 1;
   return {
     ref: "",
     objectId,
@@ -240,8 +249,9 @@ function emptyPlan(objectId: string, name: string, options: ExportOptions): Expo
     tier: "fail",
     rect: { x: 0, y: 0, width: 0, height: 0 },
     format: options.format ?? "png",
-    exportScale: options.scale ?? 2,
-    targetScale: options.scale ?? 2,
+    sourceScale: 1,
+    exportScale: designScale,
+    targetScale: designScale,
     resampled: false,
     opaque: false,
     width: 0,

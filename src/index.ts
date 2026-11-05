@@ -11,8 +11,8 @@ import { CoDesignError, isCoDesignError } from "./errors.js";
 import { planLayerExports, planRegionExports, summarizeTiers, type RegionRequest } from "./export.js";
 import { summarize, toManifestEntries, writeManifest, type ManifestEntry } from "./manifest.js";
 import { buildSpec } from "./spec.js";
-import type { ExportFormat } from "./slicing.js";
-import { attachSlices, DEFAULT_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
+import type { ExportFormat, ScaleSpec } from "./slicing.js";
+import { attachSlices, NATIVE_SCALE, downloadSlices, downloadPreviews, resolveScreens } from "./tools.js";
 import type { Layer, ShareInfo } from "./types.js";
 import { mapLimit } from "./utils/concurrency.js";
 import { createNamer } from "./utils/filename.js";
@@ -69,6 +69,28 @@ const qualitySchema = z
   .max(100)
   .optional()
   .describe("jpg/webp 质量（1-100），对 png 无效。");
+
+/**
+ * 倍率参数。
+ *
+ * 「几倍图」在前端语境里默认指 CSS 的 2x（375 × 2 = 750px），
+ * 而在设计稿语境里指 750 × 2 = 1500px，两者差整整一倍。
+ * 所以拆成两个显式参数，不传就取原图。
+ */
+const scaleSchema = z
+  .number()
+  .positive()
+  .optional()
+  .describe(
+    "相对**设计稿**（通常 750 宽）的倍率。scale:2 → 落盘 1500px。不传则取图层原图、不重采样。",
+  );
+const cssScaleSchema = z
+  .number()
+  .positive()
+  .optional()
+  .describe(
+    "相对**CSS**（通常 375 宽）的倍率，与前端说的「2 倍图」一致。cssScale:2 → 落盘 750px。与 scale 二选一。",
+  );
 
 server.registerTool(
   "design_get",
@@ -157,11 +179,12 @@ server.registerTool(
     description: [
       "批量下载 CoDesign 画板的切图，并输出 codesign-manifest.json / .csv 清单。",
       "自动把 OSS 签名地址转换为可下载的 CDN 地址，文件名统一为「图层名@倍率x」，同名自动加序号。",
-      `默认导出 ${DEFAULT_SCALE} 倍图。`,
-      "重要：如果用户在对话里明确说了要几倍图（例如「要 3 倍图」「导出 @2x」），",
-      "必须把倍数传给 scale 参数，用户指定的优先级高于默认值。",
-      "设计稿没有目标倍率时会由服务端重采样到目标尺寸（resampled=true），",
-      "所以落盘尺寸永远等于「设计稿宽 × 目标倍率」，不会拿到偏大的图。",
+      "默认取图层自带的**原图**，不做任何缩放，画质零损失。",
+      "需要指定倍率时有两个参数，基准不同、别混用：",
+      "  cssScale —— 相对 CSS 宽（375）。cssScale:2 落盘 750px，即前端常说的「2 倍图」",
+      "  scale    —— 相对设计稿宽（750）。scale:2 落盘 1500px，对 CSS 其实是 4x",
+      "用户说「要 2 倍图」通常指 cssScale:2。设计稿没有该倍率时会由服务端重采样（resampled=true），",
+      "落盘尺寸始终等于目标尺寸；源图倍率记在 sourceScale 里。",
       "需要 jpg/webp 或更小的图时传 format / quality / targetWidth。",
       "返回每个文件的 ref、objectId、坐标、倍率与像素尺寸；清单文件可用于批量核对。",
     ].join(""),
@@ -170,15 +193,8 @@ server.registerTool(
       password: passwordSchema,
       screenId: screenIdSchema,
       outDir: outDirSchema,
-      scale: z
-        .number()
-        .positive()
-        .optional()
-        .describe(
-          `导出倍率，默认 ${DEFAULT_SCALE}。` +
-            "用户明确要求几倍图时务必传这个参数（如用户说「3 倍图」就传 3）。" +
-            "该图层没有指定倍率时会由服务端重采样到目标尺寸，并在 warning 中说明。",
-        ),
+      scale: scaleSchema,
+      cssScale: cssScaleSchema,
       targetWidth: z
         .number()
         .positive()
@@ -214,12 +230,9 @@ server.registerTool(
       password: passwordSchema,
       screenId: screenIdSchema,
       outDir: outDirSchema,
-      scale: z
-        .number()
-        .positive()
-        .optional()
-        .describe("预览图倍率，默认 1（原图）。传 2 则输出设计稿 2 倍尺寸，适合放大查看细节。"),
-      targetWidth: z.number().positive().optional().describe("目标像素宽，优先于 scale。"),
+      scale: scaleSchema,
+      cssScale: cssScaleSchema,
+      targetWidth: z.number().positive().optional().describe("目标像素宽，优先于倍率。"),
     },
   },
   async (args) => run(() => handleDownloadPreviews(args)),
@@ -266,12 +279,9 @@ server.registerTool(
         )
         .optional()
         .describe("要导出的矩形区域列表，坐标为设计稿原始像素（不是 CSS 缩放后的值）。"),
-      scale: z
-        .number()
-        .positive()
-        .optional()
-        .describe(`目标倍率，默认 ${DEFAULT_SCALE}。导出图尺寸 = 设计稿尺寸 × 该倍率。`),
-      targetWidth: z.number().positive().optional().describe("目标像素宽，优先于 scale。"),
+      scale: scaleSchema,
+      cssScale: cssScaleSchema,
+      targetWidth: z.number().positive().optional().describe("目标像素宽，优先于倍率。"),
       format: formatSchema,
       quality: qualitySchema,
     },
@@ -312,14 +322,8 @@ server.registerTool(
         .max(50)
         .optional()
         .describe("最多下钻几层图层，默认不限"),
-      scale: z
-        .number()
-        .positive()
-        .optional()
-        .describe(
-          `切图目标倍率，默认 ${DEFAULT_SCALE}。` +
-            "要与 design_download_slices 传同一个值，spec 里给出的切图文件名才和实际落盘一致。",
-        ),
+      scale: scaleSchema,
+      cssScale: cssScaleSchema,
       format: z
         .enum(["png", "jpg", "webp"])
         .optional()
@@ -328,6 +332,28 @@ server.registerTool(
   },
   async (args) => run(() => handleGetSpec(args)),
 );
+
+/**
+ * 把工具参数换算成倍率语义。
+ * 都不传就是 native（取原图不重采样）；同时传两个则报错，避免歧义。
+ */
+function resolveScale(args: { scale?: number; cssScale?: number }): ScaleSpec {
+  if (args.scale !== undefined && args.cssScale !== undefined) {
+    throw new CoDesignError(
+      "scale 与 cssScale 不能同时传",
+      undefined,
+      [
+        "两者的基准不同：",
+        "  scale    相对设计稿（750 宽），scale:2 → 落盘 1500px",
+        "  cssScale 相对 CSS（375 宽），cssScale:2 → 落盘 750px（即前端常说的 2 倍图）",
+        "只传其中一个；都不传则取图层原图、不重采样。",
+      ].join("\n"),
+    );
+  }
+  if (args.cssScale !== undefined) return { kind: "css", scale: args.cssScale };
+  if (args.scale !== undefined) return { kind: "design", scale: args.scale };
+  return NATIVE_SCALE;
+}
 
 /** 统一的执行包装：错误翻译成给 AI 看的提示 */
 async function run(handler: () => Promise<ReturnType<typeof jsonResult>>) {
@@ -477,10 +503,12 @@ async function handleDownloadSlices(args: {
   screenId?: number;
   outDir?: string;
   scale?: number;
+  cssScale?: number;
   targetWidth?: number;
   format?: ExportFormat;
   quality?: number;
 }) {
+  const scaleSpec = resolveScale(args);
   const share = await loadShare(args.url, args.password);
   const targets = await resolveScreens(client, share, args.screenId ?? parseScreenId(args.url), {
     slices: true,
@@ -498,7 +526,7 @@ async function handleDownloadSlices(args: {
     // 多画板时每个画板一个子目录，目录内各自去重
     const dir = targets.length > 1 ? `${outDir}/${sanitize(t.detail.name)}` : outDir;
     const downloaded = await downloadSlices(client, t.slices ?? [], dir, {
-      scale: args.scale,
+      scale: scaleSpec,
       targetWidth: args.targetWidth,
       format: args.format,
       quality: args.quality,
@@ -516,7 +544,7 @@ async function handleDownloadSlices(args: {
   const failed = results.reduce((n, r) => n + r.files.filter((f: any) => !f.ok).length, 0);
 
   // 汇总倍率：区分「重采样对齐」与「就近取档」两种情况
-  const requestedScale = args.scale ?? DEFAULT_SCALE;
+  const requestedScale = scaleSpec.kind === "native" ? "native" : scaleSpec.scale;
   const scaleUsage: Record<string, number> = {};
   const substituted: { name: string; scale: number }[] = [];
   const resampled: { name: string; from: number; to: number }[] = [];
@@ -525,8 +553,8 @@ async function handleDownloadSlices(args: {
       if (f.scale === undefined) continue;
       scaleUsage[String(f.scale)] = (scaleUsage[String(f.scale)] ?? 0) + 1;
       if (f.substituted) substituted.push({ name: f.name, scale: f.scale });
-      if (f.resampled && f.exportScale !== f.targetScale) {
-        resampled.push({ name: f.name, from: f.exportScale, to: f.targetScale });
+      if (f.resampled && f.sourceScale !== f.targetScale) {
+        resampled.push({ name: f.name, from: f.sourceScale, to: f.targetScale });
       }
     }
   }
@@ -536,7 +564,7 @@ async function handleDownloadSlices(args: {
       version: VERSION,
       generatedAt: new Date().toISOString(),
       outDir,
-      targetScale: requestedScale,
+      targetScale: scaleSpec.kind === "native" ? 0 : scaleSpec.scale,
       total: manifestEntries.length,
     },
     entries: manifestEntries,
@@ -597,7 +625,7 @@ async function handleDownloadPreviews(args: {
   const outDir = args.outDir || DEFAULT_OUT;
   const files = await downloadPreviews(client, targets, outDir, {
     concurrency: CONCURRENCY,
-    scale: args.scale,
+    scale: resolveScale(args),
     targetWidth: args.targetWidth,
   });
   const failed = files.filter((f) => !f.ok).length;
@@ -614,6 +642,7 @@ async function handleExport(args: {
   objectIds?: string[];
   regions?: RegionRequest[];
   scale?: number;
+  cssScale?: number;
   targetWidth?: number;
   format?: ExportFormat;
   quality?: number;
@@ -633,6 +662,7 @@ async function handleExport(args: {
   }
 
   const share = await loadShare(args.url, args.password);
+  const scaleSpec = resolveScale(args);
   const screenId = resolveScreenId(share, args.screenId, args.screenName) ?? parseScreenId(args.url);
   const targets = await resolveScreens(client, share, screenId, {
     meta: true,
@@ -652,14 +682,14 @@ async function handleExport(args: {
 
     const plans = hasLayers
       ? planLayerExports(args.objectIds!, t.tree?.layers ?? [], t.slices ?? [], t.detail, {
-          scale: args.scale,
+          scale: scaleSpec,
           targetWidth: args.targetWidth,
           format: args.format,
           quality: args.quality,
           namer,
         })
       : planRegionExports(args.regions!, t.detail, {
-          scale: args.scale,
+          scale: scaleSpec,
           targetWidth: args.targetWidth,
           format: args.format,
           quality: args.quality,
@@ -745,7 +775,7 @@ async function handleExport(args: {
       version: VERSION,
       generatedAt: new Date().toISOString(),
       outDir,
-      targetScale: args.scale ?? DEFAULT_SCALE,
+      targetScale: scaleSpec.kind === "native" ? 0 : scaleSpec.scale,
       total: manifestEntries.length,
     },
     entries: manifestEntries,
@@ -796,6 +826,7 @@ async function handleGetSpec(args: {
   maxLayers?: number;
   maxDepth?: number;
   scale?: number;
+  cssScale?: number;
   format?: ExportFormat;
 }) {
   const share = await loadShare(args.url, args.password);
@@ -817,7 +848,7 @@ async function handleGetSpec(args: {
       cssWidth: args.cssWidth,
       maxLayers: args.maxLayers,
       maxDepth: args.maxDepth,
-      scale: args.scale ?? DEFAULT_SCALE,
+      scale: resolveScale(args),
       format: args.format,
       namer,
     });
