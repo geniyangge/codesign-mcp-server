@@ -139,9 +139,10 @@ test("toAsciiName 把常见中文词转成英文", () => {
 });
 
 test("toAsciiName 无匹配时用 objectId 兜底", () => {
-  assert.equal(toAsciiName("示例cp头像框", "290").startsWith("layer-") || toAsciiName("示例cp头像框", "290").length > 0, true);
-  const out = toAsciiName("纯中文名", "290");
-  assert.equal(out, "layer-290");
+  // 有可识别词就保留，不退回 objectId
+  assert.equal(toAsciiName("示例cp头像框", "290"), "cp-avatar");
+  // 全都识别不出时才用 objectId 兜底
+  assert.equal(toAsciiName("纯中文名", "290"), "layer-290");
 });
 
 test("toAsciiName 结果只含安全字符", () => {
