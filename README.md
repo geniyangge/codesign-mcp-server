@@ -1,4 +1,4 @@
-# codesign-mcp-server
+<h1 align="center">codesign-mcp-server</h1>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/codesign-mcp-server"><img src="https://img.shields.io/npm/l/codesign-mcp-server?cacheSeconds=3600" alt="License"></a>
